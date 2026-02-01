@@ -366,6 +366,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
+    cout << "Reading Instructions:" << endl;
+    
     for (uint64_t steps = 0; steps < cfg.max_steps && pc + 3 < code.hi; steps++)
     {
         uint32_t inst = mem.read32(pc);
