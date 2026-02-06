@@ -46,7 +46,7 @@ static void print_help()
                  "  --show-memory=(none|used|all)\n"
                  "      Control memory dump behavior\n"
                  "        none   : do not display memory\n"
-                 "        used : display memory written in the current step\n"
+                 "        used   : display memory written in the current step\n"
                  "        all    : display full memory range each step\n\n"
                  "  --mem-addr-base=<addr>\n"
                  "      Base address for --show-memory=all (default: 0x00000000)\n\n"
@@ -54,6 +54,8 @@ static void print_help()
                  "      End address for --show-memory=all (default: 0x000000FF)\n\n"
                  "  --show-register-file=(none|used|all)\n"
                  "      Control register file dump behavior\n"
+                 "  --show-stats=(true|false)\n"
+                 "      Dump several statistics at the end of the simulation\n"
                  "  --dump-instrs\n\n"
                  "      Show instructions in the ELF in order\n"
                  "Examples:\n"
@@ -69,6 +71,7 @@ struct Config
     uint64_t max_steps = 1000; // default
     bool trace = false;
     bool dump_instrs = false;
+    bool show_stats = true;
 
     DumpMode show_memory = DumpMode::NONE;
     DumpMode show_rf = DumpMode::NONE;
@@ -102,6 +105,14 @@ Config parse_args(int argc, char **argv)
         {
             cfg.trace = true;
         }
+        else if (a == "--show-stats" || a == "--show-stats=ture")
+        {
+            cfg.trace = true;
+        }
+        else if (a == "--show-stats=false")
+        {
+            cfg.show_stats = false;
+        }
         else if (starts_with(a, "--max-steps="))
         {
             cfg.max_steps = stoull(a.substr(12));
@@ -112,7 +123,7 @@ Config parse_args(int argc, char **argv)
         }
         else if (starts_with(a, "--show-register-file="))
         {
-            cfg.show_rf = parse_dump_mode(a.substr(22));
+            cfg.show_rf = parse_dump_mode(a.substr(21));
         }
         else if (starts_with(a, "--mem-addr-base="))
         {
@@ -176,12 +187,19 @@ public:
     ~RegisterFile();
 
     int getSize() const;
-    uint32_t getValue(int index);
+    uint32_t getValue(int index) const;
     void writeValue(int index, uint32_t value);
+
+    void begin_step() { step_writes.clear(); }
+    const auto &get_step_writes() const { return step_writes; }
+    const auto &get_used_regs() const { return used_regs; }
 
 private:
     uint32_t *rf;
     int sz;
+
+    std::unordered_set<int> used_regs;
+    std::vector<std::pair<int, uint32_t>> step_writes;
 };
 
 RegisterFile::RegisterFile(int size)
@@ -212,9 +230,11 @@ void RegisterFile::writeValue(int index, uint32_t value)
         return;
     }
     rf[index] = value;
+    used_regs.insert(index);
+    step_writes.push_back({index, value});
 }
 
-uint32_t RegisterFile::getValue(int index)
+uint32_t RegisterFile::getValue(int index) const
 {
     if (index < 0 || index >= sz)
     {
@@ -356,7 +376,21 @@ struct CPU
     uint32_t pc = 0;
     RegisterFile rf;
 
+    struct Stats
+    {
+        uint64_t instret = 0;
+        uint64_t loads = 0;
+        uint64_t stores = 0;
+        uint64_t branches = 0;
+        uint64_t taken_branches = 0;
+        uint64_t jumps = 0;
+
+        uint64_t bytes_read = 0;
+        uint64_t bytes_written = 0;
+    };
+
     CPU() : rf(32) {}
+    Stats stats{};
 
     // returns false if should stop (for now: illegal instruction)
     bool step(Memory &mem, const Config &cfg)
@@ -403,6 +437,7 @@ struct CPU
                            string(regname(rd)) + ", " +
                            string(regname(rs1)) + ", " +
                            to_string(imm));
+                stats.instret++;
                 return true;
             }
             case 0x1:
@@ -417,6 +452,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                to_string(shamt));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -431,6 +467,7 @@ struct CPU
                            string(regname(rd)) + ", " +
                            string(regname(rs1)) + ", " +
                            to_string(imm));
+                stats.instret++;
                 return true;
             }
             case 0x3:
@@ -443,6 +480,7 @@ struct CPU
                            string(regname(rd)) + ", " +
                            string(regname(rs1)) + ", " +
                            to_string(imm));
+                stats.instret++;
                 return true;
             }
             case 0x4:
@@ -455,6 +493,7 @@ struct CPU
                            string(regname(rd)) + ", " +
                            string(regname(rs1)) + ", " +
                            to_string(imm));
+                stats.instret++;
                 return true;
             }
             case 0x5:
@@ -469,6 +508,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                to_string(shamt));
+                    stats.instret++;
                     return true;
                 }
                 else if (funct7 == 0x20)
@@ -482,6 +522,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                to_string(shamt));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -496,6 +537,7 @@ struct CPU
                            string(regname(rd)) + ", " +
                            string(regname(rs1)) + ", " +
                            to_string(imm));
+                stats.instret++;
                 return true;
             }
             case 0x7:
@@ -508,6 +550,7 @@ struct CPU
                            string(regname(rd)) + ", " +
                            string(regname(rs1)) + ", " +
                            to_string(imm));
+                stats.instret++;
                 return true;
             }
             default:
@@ -532,6 +575,9 @@ struct CPU
                            string(regname(rd)) + ", " +
                            to_string(imm) + "(" +
                            string(regname(rs1)) + ")");
+                stats.bytes_read += 1;
+                stats.loads++;
+                stats.instret++;
                 return true;
             }
             // LH
@@ -549,6 +595,9 @@ struct CPU
                            string(regname(rd)) + ", " +
                            to_string(imm) + "(" +
                            string(regname(rs1)) + ")");
+                stats.bytes_read += 2;
+                stats.loads++;
+                stats.instret++;
                 return true;
             }
             // LW
@@ -566,6 +615,9 @@ struct CPU
                            string(regname(rd)) + ", " +
                            to_string(imm) + "(" +
                            string(regname(rs1)) + ")");
+                stats.bytes_read += 4;
+                stats.loads++;
+                stats.instret++;
                 return true;
             }
             // LBU
@@ -579,6 +631,9 @@ struct CPU
                            string(regname(rd)) + ", " +
                            to_string(imm) + "(" +
                            string(regname(rs1)) + ")");
+                stats.bytes_read += 1;
+                stats.loads++;
+                stats.instret++;
                 return true;
             }
             // LHU
@@ -596,6 +651,9 @@ struct CPU
                            string(regname(rd)) + ", " +
                            to_string(imm) + "(" +
                            string(regname(rs1)) + ")");
+                stats.bytes_read += 2;
+                stats.loads++;
+                stats.instret++;
                 return true;
             }
             default:
@@ -620,6 +678,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 // SUB
@@ -631,6 +690,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -646,6 +706,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -663,6 +724,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -678,6 +740,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -693,6 +756,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -708,6 +772,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 else if (funct7 == 0x20)
@@ -720,6 +785,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -735,6 +801,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -750,6 +817,7 @@ struct CPU
                                string(regname(rd)) + ", " +
                                string(regname(rs1)) + ", " +
                                string(regname(rs2)));
+                    stats.instret++;
                     return true;
                 }
                 break;
@@ -766,6 +834,7 @@ struct CPU
             trace_line("lui " +
                        string(regname(rd)) + ", " +
                        hex32((imm)));
+            stats.instret++;
             return true;
         }
 
@@ -777,6 +846,7 @@ struct CPU
             trace_line("auipc " +
                        string(regname(rd)) + ", " +
                        hex32((imm)));
+            stats.instret++;
             return true;
         }
 
@@ -793,6 +863,9 @@ struct CPU
                 mem.write8(addr, (uint8_t)data);
                 trace_line("sb " + string(regname(rs2)) + ", " +
                            to_string(imm) + "(" + string(regname(rs1)) + ")");
+                stats.bytes_written += 1;
+                stats.stores++;
+                stats.instret++;
                 return true;
 
             case 0x1: // SH
@@ -801,6 +874,9 @@ struct CPU
                 mem.write16(addr, (uint16_t)data);
                 trace_line("sh " + string(regname(rs2)) + ", " +
                            to_string(imm) + "(" + string(regname(rs1)) + ")");
+                stats.bytes_written += 2;
+                stats.stores++;
+                stats.instret++;
                 return true;
 
             case 0x2: // SW
@@ -809,6 +885,9 @@ struct CPU
                 mem.write32(addr, data);
                 trace_line("sw " + string(regname(rs2)) + ", " +
                            to_string(imm) + "(" + string(regname(rs1)) + ")");
+                stats.bytes_written += 4;
+                stats.stores++;
+                stats.instret++;
                 return true;
 
             default:
@@ -827,72 +906,102 @@ struct CPU
             case 0x0: // BEQ
             {
                 if (rf.getValue(rs1) == rf.getValue(rs2))
+                {
                     pc = old_pc + (uint32_t)off;
+                    stats.taken_branches++;
+                }
 
                 trace_line("beq " +
                            string(regname(rs1)) + ", " +
                            string(regname(rs2)) + ", " +
                            to_string(off));
+                stats.branches++;
+                stats.instret++;
                 return true;
             }
             // BNE
             case 0x1:
             {
                 if (rf.getValue(rs1) != rf.getValue(rs2))
+                {
                     pc = old_pc + (uint32_t)off;
+                    stats.taken_branches++;
+                }
 
                 trace_line("bne " +
                            string(regname(rs1)) + ", " +
                            string(regname(rs2)) + ", " +
                            to_string(off));
+                stats.branches++;
+                stats.instret++;
                 return true;
             }
             // BLT
             case 0x4:
             {
                 if ((int32_t)rf.getValue(rs1) < (int32_t)rf.getValue(rs2))
+                {
                     pc = old_pc + (uint32_t)off;
+                    stats.taken_branches++;
+                }
 
                 trace_line("blt " +
                            string(regname(rs1)) + ", " +
                            string(regname(rs2)) + ", " +
                            to_string(off));
+                stats.branches++;
+                stats.instret++;
                 return true;
             }
             // BGE
             case 0x5:
             {
                 if ((int32_t)rf.getValue(rs1) >= (int32_t)rf.getValue(rs2))
+                {
                     pc = old_pc + (uint32_t)off;
+                    stats.taken_branches++;
+                }
 
                 trace_line("bge " +
                            string(regname(rs1)) + ", " +
                            string(regname(rs2)) + ", " +
                            to_string(off));
+                stats.branches++;
+                stats.instret++;
                 return true;
             }
             // BLTU
             case 0x6:
             {
                 if (rf.getValue(rs1) < rf.getValue(rs2))
+                {
                     pc = old_pc + (uint32_t)off;
+                    stats.taken_branches++;
+                }
 
                 trace_line("bltu " +
                            string(regname(rs1)) + ", " +
                            string(regname(rs2)) + ", " +
                            to_string(off));
+                stats.branches++;
+                stats.instret++;
                 return true;
             }
             // BGEU
             case 0x7:
             {
                 if (rf.getValue(rs1) >= rf.getValue(rs2))
+                {
                     pc = old_pc + (uint32_t)off;
+                    stats.taken_branches++;
+                }
 
                 trace_line("bgeu " +
                            string(regname(rs1)) + ", " +
                            string(regname(rs2)) + ", " +
                            to_string(off));
+                stats.branches++;
+                stats.instret++;
                 return true;
             }
             default:
@@ -914,6 +1023,8 @@ struct CPU
 
                 trace_line("jalr " + string(regname(rd)) + ", " +
                            to_string(imm) + "(" + string(regname(rs1)) + ")");
+                stats.jumps++;
+                stats.instret++;
                 return true;
             }
             break;
@@ -928,6 +1039,8 @@ struct CPU
             trace_line("jal " +
                        string(regname(rd)) +
                        ", " + to_string(off));
+            stats.jumps++;
+            stats.instret++;
             return true;
         }
         }
@@ -1075,7 +1188,7 @@ static void dump_used_words(const Memory &mem)
     for (uint32_t a : addrs)
     {
         if (!first && a != prev + 4)
-            std::cout << "\n";   // region separator
+            std::cout << "\n"; // region separator
 
         std::cout << hex32(a) << ": " << hex32(mem.read32(a)) << " = " << mem.read32(a) << "\n";
 
@@ -1083,7 +1196,6 @@ static void dump_used_words(const Memory &mem)
         first = false;
     }
 }
-
 
 static void dump_all_range_words(const Memory &mem, uint32_t base, uint32_t end)
 {
@@ -1093,9 +1205,40 @@ static void dump_all_range_words(const Memory &mem, uint32_t base, uint32_t end)
 
     for (; a < e; a += 4)
     {
-        std::cout << hex32(a) << ": " << hex32(mem.read32(a)) << " = " << mem.read32(a) <<"\n";
+        std::cout << hex32(a) << ": " << hex32(mem.read32(a)) << " = " << mem.read32(a) << "\n";
     }
 }
+
+static void dump_rf_step_used(const RegisterFile &rf)
+{
+    const auto &w = rf.get_step_writes();
+    for (const auto &p : w)
+    {
+        int r = p.first;
+        uint32_t v = p.second;
+        std::cout << "  RF: " << regname(r) << " = " << hex32(v) << "\n";
+    }
+}
+
+static void dump_rf_used_end(const RegisterFile &rf)
+{
+    std::vector<int> regs(rf.get_used_regs().begin(), rf.get_used_regs().end());
+    std::sort(regs.begin(), regs.end());
+
+    for (int r : regs)
+        std::cout << regname(r) << " = " << hex32(rf.getValue(r)) << "\n";
+    cout << "\n";
+}
+
+static void dump_rf_all(const RegisterFile &rf)
+{
+    for (int r = 0; r < 32; r++)
+    {
+        std::cout << regname(r) << "=" << hex32(rf.getValue(r)) << ((r % 8 == 7) ? "\n" : "\t");
+    }
+    std::cout << "\n";
+}
+
 /************************************************************************************/
 
 int main(int argc, char **argv)
@@ -1171,6 +1314,14 @@ int main(int argc, char **argv)
                 {
                     dump_step_writes(mem);
                 }
+                if (cfg.show_rf == DumpMode::USED) // per your semantics: USED => per-step writes when tracing
+                {
+                    dump_rf_step_used(cpu.rf);
+                }
+                else if (cfg.show_rf == DumpMode::ALL)
+                {
+                    dump_rf_all(cpu.rf);
+                }
             }
         }
 
@@ -1185,6 +1336,34 @@ int main(int argc, char **argv)
             cout << "\033[1;36mMEM(\033[1;34mAll\033[1;36m):\n";
             dump_all_range_words(mem, cfg.mem_base, cfg.mem_end);
         }
+        cout << "\033[1;35m\n";
+        if (cfg.show_rf == DumpMode::USED)
+        {
+            std::cout << "RF(used):\n";
+            dump_rf_used_end(cpu.rf);
+        }
+        else if (cfg.show_rf == DumpMode::ALL)
+        {
+            std::cout << "RF(all):\n";
+            dump_rf_all(cpu.rf);
+        }
+        cout << "\033[1;0m";
+    }
+
+    /*** Show statistics at the end of simulation ***/
+    if (cfg.show_stats)
+    {
+        cout << "\033[1;33m\n";
+        cout << dec;
+        cout << "--- Simulation Summary ---\n";
+        cout << "instret:        " << cpu.stats.instret << "\n";
+        cout << "loads:          " << cpu.stats.loads << "\n";
+        cout << "stores:         " << cpu.stats.stores << "\n";
+        cout << "branches:       " << cpu.stats.branches << "\n";
+        cout << "taken_branches: " << cpu.stats.taken_branches << "\n";
+        cout << "jumps:          " << cpu.stats.jumps << "\n";
+        cout << "bytes_read:     " << cpu.stats.bytes_read << "\n";
+        cout << "bytes_written:  " << cpu.stats.bytes_written << "\n";
         cout << "\033[1;0m\n";
     }
 
