@@ -96,6 +96,10 @@ Config parse_args(int argc, char **argv)
         {
             cfg.trace = false;
         }
+        else if (a == "--trace")
+        {
+            cfg.trace = true;
+        }
         else if (starts_with(a, "--max-steps="))
         {
             cfg.max_steps = stoull(a.substr(12));
@@ -154,7 +158,8 @@ static const char *regname(uint32_t r)
     return names[r & 31];
 }
 
-static std::string hex32(uint32_t v) {
+static std::string hex32(uint32_t v)
+{
     std::ostringstream oss;
     oss << "0x" << std::hex << std::setw(8) << std::setfill('0') << v;
     return oss.str();
@@ -230,6 +235,23 @@ public:
         return (it == mem.end()) ? 0 : it->second;
     }
 
+    int8_t read8s(uint32_t addr) const
+    {
+        return (int8_t)read8(addr);
+    }
+
+    uint16_t read16(uint32_t addr) const
+    {
+        uint16_t b0 = read8(addr);
+        uint16_t b1 = read8(addr + 1);
+        return b0 | (b1 << 8);
+    }
+
+    int16_t read16s(uint32_t addr) const
+    {
+        return (int16_t)read16(addr);
+    }
+
     uint32_t read32(uint32_t addr) const
     {
         // little-endian
@@ -238,6 +260,12 @@ public:
         uint32_t b2 = read8(addr + 2);
         uint32_t b3 = read8(addr + 3);
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+    }
+
+    void write16(uint32_t addr, uint16_t val)
+    {
+        write8(addr + 0, val & 0xFF);
+        write8(addr + 1, (val >> 8) & 0xFF);
     }
 
     void write32(uint32_t addr, uint32_t val)
@@ -323,7 +351,7 @@ struct CPU
 
         switch (opcode)
         {
-        // I-Type
+        // I-Type - ALOps
         case 0x13:
         {
             // ADDI
@@ -347,7 +375,7 @@ struct CPU
                 // SLLI
                 if (funct7 == 0x00)
                 {
-                    uint32_t shamt = get_bits(inst, 24, 20);
+                    uint32_t shamt = get_bits(inst, 24, 20) & 0x1F;
                     uint32_t v = rf.getValue(rs1) << shamt;
                     rf.writeValue(rd, v);
                     trace_line("slli " +
@@ -399,7 +427,7 @@ struct CPU
                 if (funct7 == 0x00)
                 {
                     // SRLI
-                    uint32_t shamt = get_bits(inst, 24, 20);
+                    uint32_t shamt = get_bits(inst, 24, 20) & 0x1F;
                     uint32_t v = rf.getValue(rs1) >> shamt;
                     rf.writeValue(rd, v);
                     trace_line("srli " +
@@ -453,19 +481,244 @@ struct CPU
             break;
         }
 
+        // I-Type - Loads
+        case 0x03:
+        {
+            switch (funct3)
+            {
+            // LB
+            case 0x0:
+            {
+                int32_t imm = imm_i(inst);
+                uint32_t addr = rf.getValue(rs1) + (uint32_t)imm;
+                int8_t data = mem.read8s(addr);
+                rf.writeValue(rd, (int32_t)data);
+                trace_line("lb " +
+                           string(regname(rd)) + ", " +
+                           to_string(imm) + "(" +
+                           string(regname(rs1)) + ")");
+                return true;
+            }
+            // LH
+            case 0x1:
+            {
+                int32_t imm = imm_i(inst);
+                uint32_t addr = rf.getValue(rs1) + (uint32_t)imm;
+
+                if (addr & 1)
+                    throw runtime_error("Misaligned LH");
+
+                int16_t data = mem.read16s(addr);
+                rf.writeValue(rd, (int32_t)data);
+                trace_line("lh " +
+                           string(regname(rd)) + ", " +
+                           to_string(imm) + "(" +
+                           string(regname(rs1)) + ")");
+                return true;
+            }
+            // LW
+            case 0x2:
+            {
+                int32_t imm = imm_i(inst);
+                uint32_t addr = rf.getValue(rs1) + (uint32_t)imm;
+
+                if (addr & 3)
+                    throw runtime_error("Misaligned LW");
+
+                uint32_t data = mem.read32(addr);
+                rf.writeValue(rd, data);
+                trace_line("lw " +
+                           string(regname(rd)) + ", " +
+                           to_string(imm) + "(" +
+                           string(regname(rs1)) + ")");
+                return true;
+            }
+            // LBU
+            case 0x4:
+            {
+                int32_t imm = imm_i(inst);
+                uint32_t addr = rf.getValue(rs1) + (uint32_t)imm;
+                uint8_t data = mem.read8(addr);
+                rf.writeValue(rd, (uint32_t)data);
+                trace_line("lbu " +
+                           string(regname(rd)) + ", " +
+                           to_string(imm) + "(" +
+                           string(regname(rs1)) + ")");
+                return true;
+            }
+            // LHU
+            case 0x5:
+            {
+                int32_t imm = imm_i(inst);
+                uint32_t addr = rf.getValue(rs1) + (uint32_t)imm;
+
+                if (addr & 1)
+                    throw runtime_error("Misaligned LHU");
+
+                uint16_t data = mem.read16(addr);
+                rf.writeValue(rd, (uint32_t)data);
+                trace_line("lhu " +
+                           string(regname(rd)) + ", " +
+                           to_string(imm) + "(" +
+                           string(regname(rs1)) + ")");
+                return true;
+            }
+            default:
+                break;
+            }
+            break;
+        }
+
         // R-Type
         case 0x33:
         {
-            // ADD
-            if (funct3 == 0x0 && funct7 == 0x00)
+            switch (funct3)
             {
-                uint32_t v = rf.getValue(rs1) + rf.getValue(rs2);
-                rf.writeValue(rd, v);
-                trace_line("add " +
-                           string(regname(rd)) + ", " +
-                           string(regname(rs1)) + ", " +
-                           string(regname(rs2)));
-                return true;
+            case 0x0:
+            {
+                // ADD
+                if (funct7 == 0x00)
+                {
+                    uint32_t v = rf.getValue(rs1) + rf.getValue(rs2);
+                    rf.writeValue(rd, v);
+                    trace_line("add " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                // SUB
+                else if (funct7 == 0x20)
+                {
+                    uint32_t v = rf.getValue(rs1) - rf.getValue(rs2);
+                    rf.writeValue(rd, v);
+                    trace_line("sub " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
+            // SLL
+            case 0x1:
+            {
+                if (funct7 == 0x00)
+                {
+                    uint32_t v = rf.getValue(rs1) << (rf.getValue(rs2) & 0x1F);
+                    rf.writeValue(rd, v);
+                    trace_line("sll " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
+            // SLT
+            case 0x2:
+            {
+                if (funct7 == 0x00)
+                {
+                    int32_t a = (int32_t)rf.getValue(rs1);
+                    int32_t b = (int32_t)rf.getValue(rs2);
+                    uint32_t v = (a < b) ? 1 : 0;
+                    rf.writeValue(rd, v);
+                    trace_line("slt " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
+            // SLTU
+            case 0x3:
+            {
+                if (funct7 == 0x00)
+                {
+                    uint32_t v = rf.getValue(rs1) < rf.getValue(rs2) ? 1 : 0;
+                    rf.writeValue(rd, v);
+                    trace_line("sltu " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
+            // XOR
+            case 0x4:
+            {
+                if (funct7 == 0x00)
+                {
+                    uint32_t v = rf.getValue(rs1) ^ rf.getValue(rs2);
+                    rf.writeValue(rd, v);
+                    trace_line("xor " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
+            case 0x5:
+            {
+                if (funct7 == 0x00)
+                {
+                    // SRL
+                    uint32_t v = rf.getValue(rs1) >> (rf.getValue(rs2) & 0x1F);
+                    rf.writeValue(rd, v);
+                    trace_line("srl " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                else if (funct7 == 0x20)
+                {
+                    // SRA
+                    int32_t sv = (int32_t)rf.getValue(rs1);
+                    uint32_t v = (uint32_t)(sv >> (rf.getValue(rs2) & 0x1F));
+                    rf.writeValue(rd, v);
+                    trace_line("sra " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
+            // OR
+            case 0x6:
+            {
+                if (funct7 == 0x00)
+                {
+                    uint32_t v = rf.getValue(rs1) | rf.getValue(rs2);
+                    rf.writeValue(rd, v);
+                    trace_line("or " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
+            // AND
+            case 0x7:
+            {
+                if (funct7 == 0x00)
+                {
+                    uint32_t v = rf.getValue(rs1) & rf.getValue(rs2);
+                    rf.writeValue(rd, v);
+                    trace_line("and " +
+                               string(regname(rd)) + ", " +
+                               string(regname(rs1)) + ", " +
+                               string(regname(rs2)));
+                    return true;
+                }
+                break;
+            }
             }
             break;
         }
@@ -481,20 +734,67 @@ struct CPU
             return true;
         }
 
+        // AUIPC
+        case 0x17:
+        {
+            uint32_t imm = inst & 0xFFFFF000u;
+            rf.writeValue(rd, old_pc + imm);
+            trace_line("auipc " +
+                       string(regname(rd)) + ", " +
+                       hex32((imm)));
+            return true;
+        }
+
         // S-Type
         case 0x23:
-        {
-            // SW
-            if (funct3 == 0x2)
+        { // STORE
+            int32_t imm = imm_s(inst);
+            uint32_t addr = rf.getValue(rs1) + (uint32_t)imm;
+            uint32_t data = rf.getValue(rs2);
+
+            switch (funct3)
             {
-                int32_t imm = imm_s(inst);
-                uint32_t addr = rf.getValue(rs1) + (uint32_t)imm;
-                uint32_t data = rf.getValue(rs2);
+            case 0x0: // SB
+                mem.write8(addr, (uint8_t)data);
+                trace_line("sb " + string(regname(rs2)) + ", " +
+                           to_string(imm) + "(" + string(regname(rs1)) + ")");
+                return true;
+
+            case 0x1: // SH
+                if (addr & 1)
+                    throw runtime_error("Misaligned SH");
+                mem.write16(addr, (uint16_t)data);
+                trace_line("sh " + string(regname(rs2)) + ", " +
+                           to_string(imm) + "(" + string(regname(rs1)) + ")");
+                return true;
+
+            case 0x2: // SW
+                if (addr & 3)
+                    throw runtime_error("Misaligned SW");
                 mem.write32(addr, data);
-                trace_line("sw " +
-                           string(regname(rs2)) + ", " +
-                           to_string(imm) + "(" +
-                           string(regname(rs1)) + ")");
+                trace_line("sw " + string(regname(rs2)) + ", " +
+                           to_string(imm) + "(" + string(regname(rs1)) + ")");
+                return true;
+
+            default:
+                break;
+            }
+            break;
+        }
+
+        // JALR
+        case 0x67:
+        {
+            if (funct3 == 0x0)
+            {
+                int32_t imm = imm_i(inst);
+                uint32_t target = (rf.getValue(rs1) + (uint32_t)imm) & ~1u;
+
+                rf.writeValue(rd, pc); // pc already = old_pc + 4
+                pc = target;
+
+                trace_line("jalr " + string(regname(rd)) + ", " +
+                           to_string(imm) + "(" + string(regname(rs1)) + ")");
                 return true;
             }
             break;
@@ -696,6 +996,9 @@ int main(int argc, char **argv)
         }
         cout << "mem[0x10000000] = 0x" << hex << mem.read32(0x10000000) << "\n";
         cout << "mem[0x10000004] = 0x" << hex << mem.read32(0x10000004) << "\n";
+        cout << "mem[0x10000008] = 0x" << hex << mem.read32(0x10000008) << "\n";
+        cout << "mem[0x1000000c] = 0x" << hex << mem.read32(0x1000000c) << "\n";
+        cout << "mem[0x10000010] = 0x" << hex << mem.read32(0x10000010) << "\n";
     }
 
     return 0;
