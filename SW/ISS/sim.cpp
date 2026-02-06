@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cstdint>
 #include <fstream>
 #include <vector>
+#include <unordered_set>
 #include <unordered_map>
 #include <stdexcept>
 #include <iomanip>
@@ -14,9 +16,20 @@ using namespace std;
 enum class DumpMode
 {
     NONE,
-    ACTIVE,
+    USED,
     ALL
 };
+
+static DumpMode parse_dump_mode(const string &s)
+{
+    if (s == "none" || s == "None")
+        return DumpMode::NONE;
+    if (s == "used" || s == "Used")
+        return DumpMode::USED;
+    if (s == "all" || s == "All")
+        return DumpMode::ALL;
+    throw runtime_error("Invalid dump mode: " + s);
+}
 
 static void print_help()
 {
@@ -30,23 +43,23 @@ static void print_help()
                  "      Maximum number of instructions to execute (default: 1000)\n\n"
                  "  --trace=(true|false)\n"
                  "      Enable per-instruction trace output (default: false)\n\n"
-                 "  --show-memory=(none|active|all)\n"
+                 "  --show-memory=(none|used|all)\n"
                  "      Control memory dump behavior\n"
                  "        none   : do not display memory\n"
-                 "        active : display memory written in the current step\n"
+                 "        used : display memory written in the current step\n"
                  "        all    : display full memory range each step\n\n"
                  "  --mem-addr-base=<addr>\n"
                  "      Base address for --show-memory=all (default: 0x00000000)\n\n"
                  "  --mem-addr-end=<addr>\n"
                  "      End address for --show-memory=all (default: 0x000000FF)\n\n"
-                 "  --show-register-file=(none|active|all)\n"
+                 "  --show-register-file=(none|used|all)\n"
                  "      Control register file dump behavior\n"
                  "  --dump-instrs\n\n"
                  "      Show instructions in the ELF in order\n"
                  "Examples:\n"
                  "  mrv_iss test.elf\n"
                  "  mrv_iss --trace=true --max-steps=10000 test.elf\n"
-                 "  mrv_iss --trace=true --show-memory=active test.elf\n";
+                 "  mrv_iss --trace=true --show-memory=used test.elf\n";
 }
 
 struct Config
@@ -67,17 +80,6 @@ struct Config
 static bool starts_with(const string &s, const string &p)
 {
     return s.rfind(p, 0) == 0;
-}
-
-static DumpMode parse_dump_mode(const string &s)
-{
-    if (s == "none")
-        return DumpMode::NONE;
-    if (s == "active")
-        return DumpMode::ACTIVE;
-    if (s == "all")
-        return DumpMode::ALL;
-    throw runtime_error("Invalid dump mode: " + s);
 }
 
 Config parse_args(int argc, char **argv)
@@ -227,34 +229,62 @@ uint32_t RegisterFile::getValue(int index)
 class Memory
 {
 public:
-    void write8(uint32_t addr, uint8_t val) { mem[addr] = val; }
+    struct MemWrite
+    {
+        uint32_t addr;
+        uint32_t size;  // 1,2,4
+        uint32_t value; // full store value
+    };
 
+    void begin_step() { step_writes.clear(); }
+    const std::vector<MemWrite> &get_step_writes() const { return step_writes; }
+
+    // "Used memory" tracking (whole run)
+    const std::unordered_set<uint32_t> &get_used_bytes() const { return used_bytes; }
+
+    // ---- Writes (LOG ONCE, NO PER-BYTE SPAM) ----
+    void write8(uint32_t addr, uint8_t val)
+    {
+        store8_raw(addr, val);
+        step_writes.push_back({addr, 1, (uint32_t)val});
+    }
+
+    void write16(uint32_t addr, uint16_t val)
+    {
+        store8_raw(addr + 0, (uint8_t)(val & 0xFF));
+        store8_raw(addr + 1, (uint8_t)((val >> 8) & 0xFF));
+        step_writes.push_back({addr, 2, (uint32_t)val});
+    }
+
+    void write32(uint32_t addr, uint32_t val)
+    {
+        store8_raw(addr + 0, (uint8_t)((val >> 0) & 0xFF));
+        store8_raw(addr + 1, (uint8_t)((val >> 8) & 0xFF));
+        store8_raw(addr + 2, (uint8_t)((val >> 16) & 0xFF));
+        store8_raw(addr + 3, (uint8_t)((val >> 24) & 0xFF));
+        step_writes.push_back({addr, 4, val});
+    }
+
+    // ---- Reads (same as you had) ----
     uint8_t read8(uint32_t addr) const
     {
         auto it = mem.find(addr);
         return (it == mem.end()) ? 0 : it->second;
     }
 
-    int8_t read8s(uint32_t addr) const
-    {
-        return (int8_t)read8(addr);
-    }
+    int8_t read8s(uint32_t addr) const { return (int8_t)read8(addr); }
 
     uint16_t read16(uint32_t addr) const
     {
         uint16_t b0 = read8(addr);
         uint16_t b1 = read8(addr + 1);
-        return b0 | (b1 << 8);
+        return (uint16_t)(b0 | (b1 << 8));
     }
 
-    int16_t read16s(uint32_t addr) const
-    {
-        return (int16_t)read16(addr);
-    }
+    int16_t read16s(uint32_t addr) const { return (int16_t)read16(addr); }
 
     uint32_t read32(uint32_t addr) const
     {
-        // little-endian
         uint32_t b0 = read8(addr);
         uint32_t b1 = read8(addr + 1);
         uint32_t b2 = read8(addr + 2);
@@ -262,23 +292,18 @@ public:
         return b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
     }
 
-    void write16(uint32_t addr, uint16_t val)
-    {
-        write8(addr + 0, val & 0xFF);
-        write8(addr + 1, (val >> 8) & 0xFF);
-    }
-
-    void write32(uint32_t addr, uint32_t val)
-    {
-        // little-endian
-        write8(addr + 0, (val >> 0) & 0xFF);
-        write8(addr + 1, (val >> 8) & 0xFF);
-        write8(addr + 2, (val >> 16) & 0xFF);
-        write8(addr + 3, (val >> 24) & 0xFF);
-    }
-
 private:
-    unordered_map<uint32_t, uint8_t> mem;
+    // base byte write: updates memory + used-bytes set, but DOES NOT log
+    void store8_raw(uint32_t addr, uint8_t val)
+    {
+        mem[addr] = val;
+        used_bytes.insert(addr);
+    }
+
+    std::unordered_map<uint32_t, uint8_t> mem;
+
+    std::vector<MemWrite> step_writes;       // per-step stores
+    std::unordered_set<uint32_t> used_bytes; // all bytes ever written
 };
 
 /****************************************************** CPU ******************************************************/
@@ -304,6 +329,16 @@ static inline int32_t imm_s(uint32_t inst)
 {
     uint32_t imm = (get_bits(inst, 31, 25) << 5) | get_bits(inst, 11, 7);
     return sext(imm, 12);
+}
+
+static inline int32_t imm_b(uint32_t inst)
+{
+    uint32_t imm =
+        (get_bits(inst, 31, 31) << 12) |
+        (get_bits(inst, 7, 7) << 11) |
+        (get_bits(inst, 30, 25) << 5) |
+        (get_bits(inst, 11, 8) << 1);
+    return sext(imm, 13);
 }
 
 static inline int32_t imm_j(uint32_t inst)
@@ -782,6 +817,90 @@ struct CPU
             break;
         }
 
+        // B-Type
+        case 0x63:
+        {
+            int32_t off = imm_b(inst);
+            switch (funct3)
+            {
+            // BEQ
+            case 0x0: // BEQ
+            {
+                if (rf.getValue(rs1) == rf.getValue(rs2))
+                    pc = old_pc + (uint32_t)off;
+
+                trace_line("beq " +
+                           string(regname(rs1)) + ", " +
+                           string(regname(rs2)) + ", " +
+                           to_string(off));
+                return true;
+            }
+            // BNE
+            case 0x1:
+            {
+                if (rf.getValue(rs1) != rf.getValue(rs2))
+                    pc = old_pc + (uint32_t)off;
+
+                trace_line("bne " +
+                           string(regname(rs1)) + ", " +
+                           string(regname(rs2)) + ", " +
+                           to_string(off));
+                return true;
+            }
+            // BLT
+            case 0x4:
+            {
+                if ((int32_t)rf.getValue(rs1) < (int32_t)rf.getValue(rs2))
+                    pc = old_pc + (uint32_t)off;
+
+                trace_line("blt " +
+                           string(regname(rs1)) + ", " +
+                           string(regname(rs2)) + ", " +
+                           to_string(off));
+                return true;
+            }
+            // BGE
+            case 0x5:
+            {
+                if ((int32_t)rf.getValue(rs1) >= (int32_t)rf.getValue(rs2))
+                    pc = old_pc + (uint32_t)off;
+
+                trace_line("bge " +
+                           string(regname(rs1)) + ", " +
+                           string(regname(rs2)) + ", " +
+                           to_string(off));
+                return true;
+            }
+            // BLTU
+            case 0x6:
+            {
+                if (rf.getValue(rs1) < rf.getValue(rs2))
+                    pc = old_pc + (uint32_t)off;
+
+                trace_line("bltu " +
+                           string(regname(rs1)) + ", " +
+                           string(regname(rs2)) + ", " +
+                           to_string(off));
+                return true;
+            }
+            // BGEU
+            case 0x7:
+            {
+                if (rf.getValue(rs1) >= rf.getValue(rs2))
+                    pc = old_pc + (uint32_t)off;
+
+                trace_line("bgeu " +
+                           string(regname(rs1)) + ", " +
+                           string(regname(rs2)) + ", " +
+                           to_string(off));
+                return true;
+            }
+            default:
+                break;
+            }
+            break;
+        }
+
         // JALR
         case 0x67:
         {
@@ -929,6 +1048,56 @@ ElfInfo loadElf32Riscv(const string &path, Memory &memory)
     return info;
 }
 
+/***************************** Other Helper Functions *****************************/
+static void dump_step_writes(const Memory &mem)
+{
+    for (const auto &w : mem.get_step_writes())
+    {
+        std::cout << "\033[1;34m  MEM: [" << hex32(w.addr) << "] <= " << hex32(w.value)
+                  << " (" << (w.size == 1 ? "sb" : w.size == 2 ? "sh"
+                                                               : "sw")
+                  << ")\033[1;0m\n";
+    }
+}
+
+static void dump_used_words(const Memory &mem)
+{
+    std::unordered_set<uint32_t> used_words;
+    for (uint32_t b : mem.get_used_bytes())
+        used_words.insert(b & ~3u);
+
+    std::vector<uint32_t> addrs(used_words.begin(), used_words.end());
+    std::sort(addrs.begin(), addrs.end());
+
+    uint32_t prev = 0;
+    bool first = true;
+
+    for (uint32_t a : addrs)
+    {
+        if (!first && a != prev + 4)
+            std::cout << "\n";   // region separator
+
+        std::cout << hex32(a) << ": " << hex32(mem.read32(a)) << " = " << mem.read32(a) << "\n";
+
+        prev = a;
+        first = false;
+    }
+}
+
+
+static void dump_all_range_words(const Memory &mem, uint32_t base, uint32_t end)
+{
+    // align to words
+    uint32_t a = base & ~3u;
+    uint32_t e = (end + 3u) & ~3u;
+
+    for (; a < e; a += 4)
+    {
+        std::cout << hex32(a) << ": " << hex32(mem.read32(a)) << " = " << mem.read32(a) <<"\n";
+    }
+}
+/************************************************************************************/
+
 int main(int argc, char **argv)
 {
     Config cfg;
@@ -984,21 +1153,39 @@ int main(int argc, char **argv)
     {
         for (uint64_t steps = 0; steps < cfg.max_steps; steps++)
         {
-            // optional: stop if PC leaves exec range (you already computed `code`)
+            // stop if PC leaves exec range
             if (!(cpu.pc >= code.lo && cpu.pc + 3 < code.hi))
             {
                 cerr << "PC left executable range: 0x" << hex << cpu.pc << "\n";
                 break;
             }
 
+            mem.begin_step(); // NEW: clear per-step write log
             if (!cpu.step(mem, cfg))
                 break;
+
+            /*** When tracing dump requested memory ***/
+            if (cfg.trace)
+            {
+                if (cfg.show_memory == DumpMode::USED || cfg.show_memory == DumpMode::ALL)
+                {
+                    dump_step_writes(mem);
+                }
+            }
         }
-        cout << "mem[0x10000000] = 0x" << hex << mem.read32(0x10000000) << "\n";
-        cout << "mem[0x10000004] = 0x" << hex << mem.read32(0x10000004) << "\n";
-        cout << "mem[0x10000008] = 0x" << hex << mem.read32(0x10000008) << "\n";
-        cout << "mem[0x1000000c] = 0x" << hex << mem.read32(0x1000000c) << "\n";
-        cout << "mem[0x10000010] = 0x" << hex << mem.read32(0x10000010) << "\n";
+
+        /*** Final dumping rules ***/
+        if (cfg.show_memory == DumpMode::USED)
+        {
+            cout << "\033[1;36mMEM(\033[1;34mUsed\033[1;36m):\n";
+            dump_used_words(mem);
+        }
+        else if (cfg.show_memory == DumpMode::ALL)
+        {
+            cout << "\033[1;36mMEM(\033[1;34mAll\033[1;36m):\n";
+            dump_all_range_words(mem, cfg.mem_base, cfg.mem_end);
+        }
+        cout << "\033[1;0m\n";
     }
 
     return 0;
