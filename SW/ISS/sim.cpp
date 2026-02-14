@@ -8,8 +8,10 @@
 #include <iomanip>
 #include <string>
 #include <sstream>
-
 #include <iostream>
+#include <functional>
+
+#include "mrv_memmap.h"
 
 using namespace std;
 
@@ -256,7 +258,16 @@ public:
         uint32_t value; // full store value
     };
 
-    void begin_step() { step_writes.clear(); }
+    void begin_step()
+    {
+        step_writes.clear();
+        tohost_written_this_step = false;
+    }
+    bool has_exit() const { return exit_requested; }
+    uint32_t exit_code() const { return exit_value; }
+
+    bool exit_written_this_step() const { return tohost_written_this_step; }
+    void set_config(Config cfg) { this->cfg = cfg; }
     const std::vector<MemWrite> &get_step_writes() const { return step_writes; }
 
     // "Used memory" tracking (whole run)
@@ -278,6 +289,14 @@ public:
 
     void write32(uint32_t addr, uint32_t val)
     {
+        // TOHOST (program exit)
+        if (addr == MRV_TOHOST)
+        {
+            exit_requested = true;
+            exit_value = val;
+            tohost_written_this_step = true;
+            return; // don't store in RAM
+        }
         store8_raw(addr + 0, (uint8_t)((val >> 0) & 0xFF));
         store8_raw(addr + 1, (uint8_t)((val >> 8) & 0xFF));
         store8_raw(addr + 2, (uint8_t)((val >> 16) & 0xFF));
@@ -313,9 +332,30 @@ public:
     }
 
 private:
+    Config cfg;
+    bool exit_requested = false;
+    uint32_t exit_value = 0;
+
+    bool tohost_written_this_step = false;
     // base byte write: updates memory + used-bytes set, but DOES NOT log
     void store8_raw(uint32_t addr, uint8_t val)
     {
+        // UART TX
+        if (addr == MRV_UART_TX)
+        {
+            if (this->cfg.trace == true)
+            {
+                cout << "\033[1;31mUART: \033[0;0m";
+            }
+            std::cout.put((char)val);
+            std::cout.flush();
+            if (this->cfg.trace == true)
+            {
+                std::cout.put((char)'\n');
+                std::cout.flush();
+            }
+            return; // do not store into RAM
+        }
         mem[addr] = val;
         used_bytes.insert(addr);
     }
@@ -1256,7 +1296,7 @@ int main(int argc, char **argv)
     }
 
     Memory mem;
-    uint32_t entry = 0;
+    mem.set_config(cfg);
 
     ElfInfo elf = loadElf32Riscv(cfg.elf_path, mem);
     CPU cpu;
@@ -1307,9 +1347,19 @@ int main(int argc, char **argv)
             if (!cpu.step(mem, cfg))
                 break;
 
+            if (mem.has_exit())
+            {
+                if (cfg.trace)
+                {
+                    cout << "\033[1;31mTOHOST EXIT:\033[0;0m " << dec << mem.exit_code() << "\n";
+                }
+                break;
+            }
+
             /*** When tracing dump requested memory ***/
             if (cfg.trace)
             {
+                cout << dec;
                 if (cfg.show_memory == DumpMode::USED || cfg.show_memory == DumpMode::ALL)
                 {
                     dump_step_writes(mem);
