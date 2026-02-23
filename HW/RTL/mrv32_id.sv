@@ -89,6 +89,21 @@ module instr_decode(
             imm_sel = IMM_I;
             case (funct3)
             3'b000: aluop = ALU_ADD; // ADDI
+            3'b001: aluop = ALU_SLL; // SLLI
+            3'b010: aluop = ALU_SLT; // SLTI
+            3'b011: aluop = ALU_SLTU; // SLTIU
+            3'b100: aluop = ALU_XOR; // XORI
+            3'b101: begin
+                if (funct7 == 7'b0000000) aluop = ALU_SRL; // SRLI
+                else if (funct7 == 7'b0100000) aluop = ALU_SRA; // SRAI
+                else // Unsupported Instruction
+                begin
+                    reg_wen = 1'b0;
+                    unsupported_instr = 1'b1;               
+                end
+            end
+            3'b110: aluop = ALU_OR; // ORI
+            3'b111: aluop = ALU_AND; // ANDI
             default: begin
                 reg_wen = 1'b0;
                 unsupported_instr = 1'b1;

@@ -25,6 +25,8 @@ module alu (
 );
   import mrv32_pkg::*;
 
+  wire [4:0] shamt = op2[4:0];  // extract shift amount outside always block
+
   always_comb begin
     case (aluop)
       ALU_ADD: result = op1 + op2;
@@ -32,6 +34,11 @@ module alu (
       ALU_AND: result = op1 & op2;
       ALU_OR:  result = op1 | op2;
       ALU_XOR: result = op1 ^ op2;
+      ALU_SLL:  result = op1 << shamt;
+      ALU_SRL:  result = op1 >> shamt;
+      ALU_SRA:  result = 32'($signed(op1) >>> shamt);
+      ALU_SLT:  result = {31'd0, $signed(op1) < $signed(op2)};
+      ALU_SLTU: result = {31'd0, op1 < op2};
       default: result = 32'd0; // Default case for unsupported operations
     endcase
   end

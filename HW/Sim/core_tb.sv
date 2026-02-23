@@ -48,7 +48,7 @@ module core_tb;
   // -------------------------
   always @(posedge clk) begin
     if (rst_n && trace_retire && core.instr_valid_wb) begin
-      $display("[CYCLE %0d] RETIRE | PC=0x%08h | NEXT_PC=0x%08h, %b",
+      $display("[CYCLE %0d] RETIRE | PC=0x%08h | NEXT_PC=0x%08h",
                cycle,
                core.pc_wb,
                core.pc_next,
@@ -56,6 +56,9 @@ module core_tb;
     end
     if (rst_n && trace_retire && core.instr_valid_mem) begin
         $display("[CYCLE %0d] MEM | stall=%b, lsu_done=%b",cycle,core.stall, core.lsu_done);
+    end
+    if (rst_n) begin
+      $display("[CYCLE %0d] reg_id_ex = %h, reg_ex_mem = %h, reg_mem_wb = %h", cycle, core.reg_id_ex, core.reg_ex_mem, core.reg_mem_wb);
     end
   end
 
