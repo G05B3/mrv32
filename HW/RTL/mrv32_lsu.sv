@@ -26,7 +26,7 @@ module mrv32_lsu (
   logic [31:0] load_data_q;
   always @* ram_hit = (eff_addr < MEM_BYTES);
 
-  assign b_addr = eff_addr[ADDR_WIDTH-1:0];
+  assign b_addr = {eff_addr[ADDR_WIDTH-1:2], 2'b00};  // word-align memory access
 
   // ----------------------------
   // Store formatting (SB/SH/SW)
