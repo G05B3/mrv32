@@ -122,11 +122,45 @@ module instr_decode(
                 unsupported_instr = 1'b1;
                 end
             end
+            3'b001: aluop = ALU_SLL; // SLL
+            3'b010: aluop = ALU_SLT; // SLT
+            3'b011: aluop = ALU_SLTU; // SLTU
+            3'b100: aluop = ALU_XOR; // XOR
+            3'b101: begin
+                if (funct7 == 7'b0000000) aluop = ALU_SRL; // SRL
+                else if (funct7 == 7'b0100000) aluop = ALU_SRA; // SRA
+                else // Unsupported Instruction
+                begin
+                    reg_wen = 1'b0;
+                    unsupported_instr = 1'b1;               
+                end
+            end
+            3'b110: aluop = ALU_OR; // OR
+            3'b111: aluop = ALU_AND; // AND
             default: begin
                 reg_wen = 1'b0;
                 unsupported_instr = 1'b1;
             end
             endcase
+        end
+
+        OPCODE_LOAD: begin /// I-TYPE (LOAD)
+           alusrc = 1'b1;
+           mem_ren = 1'b1;
+           reg_wen = (rd_addr != 5'd0);
+           imm_sel = IMM_I;
+           aluop = ALU_ADD;
+           case (funct3)
+           3'b000: mem_wstrb = WSTRB_B; // LB
+           3'b001: mem_wstrb = WSTRB_H; // LH
+           3'b010: mem_wstrb = WSTRB_W; // LW
+           3'b100: mem_wstrb = WSTRB_B; // LBU
+           3'b101: mem_wstrb = WSTRB_H; // LHU
+           default: begin
+            mem_ren = 1'b0;
+            unsupported_instr = 1'b1;
+           end
+           endcase 
         end
 
         OPCODE_STYPE: begin // S-TYPE (STORE)
@@ -135,6 +169,8 @@ module instr_decode(
             imm_sel = IMM_S;
             aluop = ALU_ADD;
             case (funct3)
+            3'b000: mem_wstrb = WSTRB_B; // SB
+            3'b001: mem_wstrb = WSTRB_H; // SH
             3'b010: mem_wstrb = WSTRB_W; // SW
             default: begin
                 mem_wen = 1'b0;

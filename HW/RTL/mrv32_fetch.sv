@@ -105,6 +105,7 @@ module instr_fetch (
           state_n       = IF_REQ; // request next instruction (PC is updated by core via pc_set)
         end
         instr_valid_n = 1'b0;
+        instr_n = 0;
       end
 
       default: begin

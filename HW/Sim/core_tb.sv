@@ -51,14 +51,20 @@ module core_tb;
       $display("[CYCLE %0d] RETIRE | PC=0x%08h | NEXT_PC=0x%08h",
                cycle,
                core.pc_wb,
-               core.pc_next,
-               core.lsu_done);
+               core.pc_next);
     end
     if (rst_n && trace_retire && core.instr_valid_mem) begin
-        $display("[CYCLE %0d] MEM | stall=%b, lsu_done=%b",cycle,core.stall, core.lsu_done);
+        $display("[CYCLE %0d] MEM | stall=%b, lsu_done=%b, waddr=%h, ld=%h",cycle,core.stall, core.lsu_done, core.b_addr, core.lsu.load_data);
     end
     if (rst_n) begin
-      $display("[CYCLE %0d] reg_id_ex = %h, reg_ex_mem = %h, reg_mem_wb = %h", cycle, core.reg_id_ex, core.reg_ex_mem, core.reg_mem_wb);
+      $display("[CYCLE %0d] PC=%h | rf_wen=%b, mem_ren_wb=0x%08h, rf_wdata=0x%08h, instr_accept=%b, stall=%b",
+               cycle,
+               core.pc_if,
+               core.rf_wen,
+               core.mem_ren_wb,
+               core.rf_wdata,
+               core.instr_accept,
+               core.stall);
     end
   end
 
@@ -159,7 +165,7 @@ module core_tb;
     $display("=======================================\n");
 
     dump_registers();
-    dump_memory(32'h0000000, 64);
+    dump_memory(32'h0000ffc, 64);
 
     $finish;
   end
