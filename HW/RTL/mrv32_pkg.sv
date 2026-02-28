@@ -1,30 +1,23 @@
-/*
- * MRV32 Core Package
- *
- * Shared constants, encodings, and architectural parameters for the MRV32
- * RV32I-compatible CPU core.
- *
- * This package defines:
- *   - RV32I instruction opcode encodings (instr[6:0])
- *   - ALU operation encodings used by decode and execute stages
- *   - Immediate format selectors for the immediate generator
- *   - Write strobe (byte enable) constants for memory stores
- *   - Common architectural constants (XLEN, register address width)
- *
- * The purpose of this package is to centralize all cross-module encodings
- * and architectural constants to ensure consistency between RTL blocks
- * such as:
- *   - instruction decode
- *   - ALU / execute stage
- *   - immediate generator
- *   - load/store unit
- *
- * All RTL modules that rely on these definitions should import this package:
- *
- *   import mrv32_pkg::*;
- *
- * This package contains no logic and is fully synthesizable.
- */
+//==============================================================================
+// Package: mrv32_pkg v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Global definitions for the MRV32 core.
+//
+// Contents:
+//   - Opcode encodings
+//   - ALU operation encodings
+//   - Immediate selectors
+//   - LSU width encodings
+//   - Architectural constants (XLEN, register count, etc.)
+//
+// Notes:
+//   Centralizes ISA-related definitions to ensure consistency
+//   across all modules.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 package mrv32_pkg;
 

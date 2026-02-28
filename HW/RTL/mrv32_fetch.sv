@@ -1,18 +1,30 @@
-/*
- * MRV32 Instruction Fetch (IF)
- *
- * Works with dual_port_byte_mem Port A:
- *   - Request: a_valid=1 for one cycle, a_wstrb=0 (read)
- *   - Response: a_rvalid indicates a_rdata is valid (32-bit little-endian word)
- *
- * This IF is suitable for a simple multi-cycle core (one instruction in flight).
- * PC update is controlled externally by the core via pc_set/pc_next, so later
- * stages can decide the next PC (e.g., JAL/branch resolution).
- */
+//==============================================================================
+// Module: mrv32_fetch v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Instruction Fetch stage with simple request/accept handshake.
+//
+// Behavior:
+//   - Issues instruction fetch requests to instruction memory.
+//   - Holds fetched instruction until accepted by WB stage.
+//   - PC advances only when instr_accept is asserted.
+//   - Guarantees only one instruction is active in the system.
+//
+// Notes:
+//   This stage intentionally prevents instruction overlap to simplify
+//   bring-up and eliminate pipeline hazards.
+//
+// Interfaces:
+//   - Memory request/response handshake
+//   - instr_valid / instr_accept handshake with WB
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 import mrv32_pkg::*;
 
-module instr_fetch (
+module mrv32_fetch (
     input  logic                  clk,
     input  logic                  rst_n,
 

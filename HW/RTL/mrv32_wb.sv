@@ -1,25 +1,23 @@
-/*
- * MRV32 Writeback (WB) Stage
- *
- * For the blocking (one-instruction-in-flight) MRV32 core.
- *
- * Responsibilities:
- *   - Select writeback data (rd_data) for the register file
- *   - Gate register writes (rf_wen) using wb_valid and reg_wen_in
- *   - Generate instr_accept (commit pulse) back to instruction fetch
- *   - Compute pc_next for instruction fetch (pc+4 or jump target)
- *
- * Supported WB sources (bring-up subset):
- *   - LUI   : rd_data = imm_in
- *   - JAL   : rd_data = pc_in + 4
- *   - LOAD  : rd_data = load_data_in
- *   - ALU   : rd_data = alu_result_in
- *
- * Notes:
- *   - This module is combinational; the wrapper should latch all *_in signals.
- *   - x0 write suppression is handled by the register file, but we also gate rf_wen
- *     with (rd_addr_in != 0) here for extra safety.
- */
+//==============================================================================
+// Module: mrv32_wb v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Writeback stage of the RV32I core.
+//
+// Responsibilities:
+//   - Select final writeback data (ALU, memory, immediate, PC+4)
+//   - Generate register file write enable and data
+//   - Compute next PC value
+//   - Assert instr_accept to allow next instruction fetch
+//
+// Notes:
+//   PC update occurs in this stage.
+//   Only one instruction is retired at a time in bring-up mode.
+//   Designed to support future pipelined execution.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 module mrv32_wb (
     // WB-stage valid token

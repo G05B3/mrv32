@@ -1,21 +1,23 @@
-/*
- * MRV32 Register File (RV32I Integer RF)
- *
- * - 32 architectural registers (x0..x31), 32-bit each
- * - 2 read ports (rs1, rs2), combinational/asynchronous reads
- * - 1 write port (rd), synchronous write on rising clock edge
- * - x0 is hardwired to zero:
- *     * reads of x0 return 0
- *     * writes to x0 are ignored
- * - Active-low reset optionally clears registers to 0 (for bring-up/debug)
- *
- * Notes:
- * - This module implements the integer register file required by RV32I.
- * - Read-during-write behavior is tool/implementation dependent unless
- *   explicit bypass/forwarding is added.
- */
+//==============================================================================
+// Module: mrv32_regfile v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   32 x 32-bit register file.
+//
+// Features:
+//   - 2 read ports
+//   - 1 write port
+//   - x0 hardwired to zero
+//
+// Notes:
+//   Writes occur in WB stage.
+//   Designed to support forwarding in future revisions.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module registerFile (
+module mrv32_regfile (
 
     input logic clk,
     input logic rst_n,

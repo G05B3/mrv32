@@ -1,32 +1,29 @@
-/*
- * MRV32 Instruction Decoder (RV32I Subset)
- *
- * Decodes a 32-bit RISC-V instruction and produces:
- *   - Register specifiers: rs1, rs2, rd
- *   - ALU control: aluop + alusrc (selects imm vs rs2 as operand 2)
- *   - Memory control: mem_ren, mem_wen, mem_wstrb (byte enables)
- *   - Writeback control: reg_wen
- *   - A sign-extended immediate value (imm) via the imm_gen module
- *   - unsupported_instr flag for illegal/unsupported encodings
- *
- * Currently supported instructions (bring-up subset):
- *   - LUI
- *   - OP-IMM: ADDI
- *   - OP: ADD, SUB
- *   - STORE: SW
- *   - JAL
- *
- * Notes:
- * - This module is purely combinational (no internal state).
- * - x0 handling (write suppression) is performed by reg_wen gating (rd != 0);
- *   the register file must still enforce x0=0 for safety.
- * - Immediate selection (imm_sel) is internal; imm_gen performs format
- *   extraction and sign-extension.
- * - For unsupported instructions, unsupported_instr is asserted and all other
- *   control outputs remain in their safe default (inactive) states.
- */
+//==============================================================================
+// Module: mrv32_decode v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Instruction decode stage for RV32I subset.
+//
+// Responsibilities:
+//   - Decode opcode/funct3/funct7
+//   - Generate ALU control signals
+//   - Select immediate format
+//   - Generate LSU control signals
+//   - Identify branch and jump instructions
+//
+// Output:
+//   - Control signals for EX, MEM, WB
+//   - Immediate value
+//   - Register file addresses
+//
+// Notes:
+//   Designed to be compatible with future fully pipelined operation.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module instr_decode(
+module mrv32_decode(
     input  logic [31:0] instr,
     output logic [4:0]  rs1_addr,
     output logic [4:0]  rs2_addr,
@@ -227,7 +224,7 @@ module instr_decode(
   end
 
   // Immediate generator
-  imm_gen immgen (
+  mrv32_imm_gen immgen (
     .instr(instr),
     .imm_sel(imm_sel),
     .imm(imm)

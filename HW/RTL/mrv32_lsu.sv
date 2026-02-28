@@ -1,3 +1,28 @@
+//==============================================================================
+// Module: mrv32_lsu v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Load-Store Unit for RV32I.
+//
+// Features:
+//   - Supports LB/LH/LW/LBU/LHU
+//   - Supports SB/SH/SW
+//   - Byte-enable generation
+//   - Sign/zero extension
+//   - Alignment checking
+//   - Blocking memory interface
+//
+// Operation:
+//   - Multi-cycle FSM (IDLE → ISSUE → WAIT_RD)
+//   - Asserts lsu_done when memory operation completes
+//
+// Notes:
+//   This unit stalls the entire core during memory transactions.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
+
 module mrv32_lsu (
     input  logic                  clk,
     input  logic                  rst_n,

@@ -1,6 +1,28 @@
-/** MRV32 Branch Control Unit **/
+//==============================================================================
+// Module: mrv32_bru v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Branch resolution unit.
+//
+// Function:
+//   - Evaluates branch conditions using ALU result flags
+//   - Generates take_branch signal
+//
+// Supported Branches:
+//   - BEQ, BNE
+//   - BLT, BGE
+//   - BLTU, BGEU
+//
+//   - JAL, JALR (Unconditional Branches)
+//
+// Notes:
+//   Branch resolution currently occurs in MEM stage.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module br_control (
+module mrv32_bru (
 
     input logic [1:0] br_sel,
     input logic [31:0] alu_result,

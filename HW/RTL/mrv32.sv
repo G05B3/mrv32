@@ -1,30 +1,23 @@
-/*
- * MRV32 Core Package
- *
- * Shared constants, encodings, and architectural parameters for the MRV32
- * RV32I-compatible CPU core.
- *
- * This package defines:
- *   - RV32I instruction opcode encodings (instr[6:0])
- *   - ALU operation encodings used by decode and execute stages
- *   - Immediate format selectors for the immediate generator
- *   - Write strobe (byte enable) constants for memory stores
- *   - Common architectural constants (XLEN, register address width)
- *
- * The purpose of this package is to centralize all cross-module encodings
- * and architectural constants to ensure consistency between RTL blocks
- * such as:
- *   - instruction decode
- *   - ALU / execute stage
- *   - immediate generator
- *   - load/store unit
- *
- * All RTL modules that rely on these definitions should import this package:
- *
- *   import mrv32_pkg::*;
- *
- * This package contains no logic and is fully synthesizable.
- */
+//==============================================================================
+// Package: mrv32_pkg v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Global definitions for the MRV32 core.
+//
+// Contents:
+//   - Opcode encodings
+//   - ALU operation encodings
+//   - Immediate selectors
+//   - LSU width encodings
+//   - Architectural constants (XLEN, register count, etc.)
+//
+// Notes:
+//   Centralizes ISA-related definitions to ensure consistency
+//   across all modules.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 package mrv32_pkg;
 
@@ -91,21 +84,33 @@ package mrv32_pkg;
   localparam int unsigned REGADDR = 5;
 
 endpackage : mrv32_pkg
-/*
- * MRV32 Instruction Fetch (IF)
- *
- * Works with dual_port_byte_mem Port A:
- *   - Request: a_valid=1 for one cycle, a_wstrb=0 (read)
- *   - Response: a_rvalid indicates a_rdata is valid (32-bit little-endian word)
- *
- * This IF is suitable for a simple multi-cycle core (one instruction in flight).
- * PC update is controlled externally by the core via pc_set/pc_next, so later
- * stages can decide the next PC (e.g., JAL/branch resolution).
- */
+//==============================================================================
+// Module: mrv32_fetch v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Instruction Fetch stage with simple request/accept handshake.
+//
+// Behavior:
+//   - Issues instruction fetch requests to instruction memory.
+//   - Holds fetched instruction until accepted by WB stage.
+//   - PC advances only when instr_accept is asserted.
+//   - Guarantees only one instruction is active in the system.
+//
+// Notes:
+//   This stage intentionally prevents instruction overlap to simplify
+//   bring-up and eliminate pipeline hazards.
+//
+// Interfaces:
+//   - Memory request/response handshake
+//   - instr_valid / instr_accept handshake with WB
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 import mrv32_pkg::*;
 
-module instr_fetch (
+module mrv32_fetch (
     input  logic                  clk,
     input  logic                  rst_n,
 
@@ -207,30 +212,28 @@ module instr_fetch (
     endcase
   end
 
-endmodule/*
- * MRV32 Immediate Generator (RV32I)
- *
- * Generates a sign-extended immediate value from a 32-bit RISC-V instruction,
- * based on the immediate format selected by the decoder.
- *
- * Supported immediate formats:
- *   - I-type : instr[31:20]
- *   - S-type : {instr[31:25], instr[11:7]}
- *   - B-type : {instr[31], instr[7], instr[30:25], instr[11:8], 1'b0}
- *   - U-type : instr[31:12] << 12
- *   - J-type : {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0}
- *
- * All immediates are sign-extended to 32 bits as defined by the RV32I ISA.
- *
- * Notes:
- * - This module is purely combinational.
- * - No instruction decoding is performed here; the decoder is responsible
- *   for selecting the correct immediate format via imm_sel.
- * - The module is reusable across single-cycle, multi-cycle, and pipelined
- *   implementations of the MRV32 core.
- */
+endmodule//==============================================================================
+// Module: mrv32_imm_gen v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Immediate value generator for RV32I instructions.
+//
+// Supported Formats:
+//   - I-type
+//   - S-type
+//   - B-type
+//   - U-type
+//   - J-type
+//
+// Notes:
+//   Immediate format selected via imm_sel control from decode stage.
+//   Outputs properly sign-extended 32-bit immediate.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module imm_gen (
+module mrv32_imm_gen (
     input  logic [31:0] instr,
     input  logic [2:0]  imm_sel,
     output logic [31:0] imm
@@ -254,35 +257,32 @@ module imm_gen (
       (imm_sel == IMM_U) ? imm_u :
       (imm_sel == IMM_J) ? imm_j :
                            32'd0;
-endmodule/*
- * MRV32 Instruction Decoder (RV32I Subset)
- *
- * Decodes a 32-bit RISC-V instruction and produces:
- *   - Register specifiers: rs1, rs2, rd
- *   - ALU control: aluop + alusrc (selects imm vs rs2 as operand 2)
- *   - Memory control: mem_ren, mem_wen, mem_wstrb (byte enables)
- *   - Writeback control: reg_wen
- *   - A sign-extended immediate value (imm) via the imm_gen module
- *   - unsupported_instr flag for illegal/unsupported encodings
- *
- * Currently supported instructions (bring-up subset):
- *   - LUI
- *   - OP-IMM: ADDI
- *   - OP: ADD, SUB
- *   - STORE: SW
- *   - JAL
- *
- * Notes:
- * - This module is purely combinational (no internal state).
- * - x0 handling (write suppression) is performed by reg_wen gating (rd != 0);
- *   the register file must still enforce x0=0 for safety.
- * - Immediate selection (imm_sel) is internal; imm_gen performs format
- *   extraction and sign-extension.
- * - For unsupported instructions, unsupported_instr is asserted and all other
- *   control outputs remain in their safe default (inactive) states.
- */
+endmodule//==============================================================================
+// Module: mrv32_decode v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Instruction decode stage for RV32I subset.
+//
+// Responsibilities:
+//   - Decode opcode/funct3/funct7
+//   - Generate ALU control signals
+//   - Select immediate format
+//   - Generate LSU control signals
+//   - Identify branch and jump instructions
+//
+// Output:
+//   - Control signals for EX, MEM, WB
+//   - Immediate value
+//   - Register file addresses
+//
+// Notes:
+//   Designed to be compatible with future fully pipelined operation.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module instr_decode(
+module mrv32_decode(
     input  logic [31:0] instr,
     output logic [4:0]  rs1_addr,
     output logic [4:0]  rs2_addr,
@@ -483,30 +483,32 @@ module instr_decode(
   end
 
   // Immediate generator
-  imm_gen immgen (
+  mrv32_imm_gen immgen (
     .instr(instr),
     .imm_sel(imm_sel),
     .imm(imm)
   );
 
-endmodule/*
- * MRV32 Register File (RV32I Integer RF)
- *
- * - 32 architectural registers (x0..x31), 32-bit each
- * - 2 read ports (rs1, rs2), combinational/asynchronous reads
- * - 1 write port (rd), synchronous write on rising clock edge
- * - x0 is hardwired to zero:
- *     * reads of x0 return 0
- *     * writes to x0 are ignored
- * - Active-low reset optionally clears registers to 0 (for bring-up/debug)
- *
- * Notes:
- * - This module implements the integer register file required by RV32I.
- * - Read-during-write behavior is tool/implementation dependent unless
- *   explicit bypass/forwarding is added.
- */
+endmodule//==============================================================================
+// Module: mrv32_regfile v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   32 x 32-bit register file.
+//
+// Features:
+//   - 2 read ports
+//   - 1 write port
+//   - x0 hardwired to zero
+//
+// Notes:
+//   Writes occur in WB stage.
+//   Designed to support forwarding in future revisions.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module registerFile (
+module mrv32_regfile (
 
     input logic clk,
     input logic rst_n,
@@ -539,26 +541,28 @@ always_ff @(posedge clk or negedge rst_n) begin
 end
 
 
-endmodule/*
- * MRV32 Arithmetic Logic Unit (ALU)
- *
- * Combinational ALU used by the MRV32 RV32I core.
- *
- * Inputs:
- *   - op1, op2 : 32-bit operands
- *   - aluop    : operation selector (encoding defined in mrv32_pkg)
- *
- * Output:
- *   - result   : 32-bit operation result
- *
- * Notes:
- * - Purely combinational (no internal state).
- * - ALU operation encodings (ALU_ADD, ALU_SUB, etc.) are defined in mrv32_pkg
- *   and must be kept consistent with the decoder and execute stage.
- * - Unsupported operations return zero by default.
- */
+endmodule//==============================================================================
+// Module: mrv32_alu v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   RV32I arithmetic logic unit.
+//
+// Supported Operations:
+//   - ADD / SUB
+//   - AND / OR / XOR
+//   - SLT / SLTU
+//   - Shift left/right (logical and arithmetic)
+//
+// Notes:
+//   Operation selected via alu_op control from decode stage.
+//   ALU result is used for arithmetic, branch comparison, and address
+//   generation.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module alu (
+module mrv32_alu (
     input  logic [31:0] op1,
     input  logic [31:0] op2,
     input  logic [3:0]  aluop,
@@ -584,7 +588,32 @@ module alu (
     endcase
   end
 
-endmodulemodule mrv32_lsu (
+endmodule//==============================================================================
+// Module: mrv32_lsu v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Load-Store Unit for RV32I.
+//
+// Features:
+//   - Supports LB/LH/LW/LBU/LHU
+//   - Supports SB/SH/SW
+//   - Byte-enable generation
+//   - Sign/zero extension
+//   - Alignment checking
+//   - Blocking memory interface
+//
+// Operation:
+//   - Multi-cycle FSM (IDLE → ISSUE → WAIT_RD)
+//   - Asserts lsu_done when memory operation completes
+//
+// Notes:
+//   This unit stalls the entire core during memory transactions.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
+
+module mrv32_lsu (
     input  logic                  clk,
     input  logic                  rst_n,
 
@@ -612,7 +641,7 @@ endmodulemodule mrv32_lsu (
   logic [31:0] load_data_q;
   always @* ram_hit = (eff_addr < MEM_BYTES);
 
-  assign b_addr = eff_addr[ADDR_WIDTH-1:0];
+  assign b_addr = {eff_addr[ADDR_WIDTH-1:2], 2'b00};  // word-align memory access
 
   // ----------------------------
   // Store formatting (SB/SH/SW)
@@ -778,9 +807,31 @@ endmodulemodule mrv32_lsu (
     end
   end
 
-endmodule/** MRV32 Branch Control Unit **/
+endmodule//==============================================================================
+// Module: mrv32_bru v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Branch resolution unit.
+//
+// Function:
+//   - Evaluates branch conditions using ALU result flags
+//   - Generates take_branch signal
+//
+// Supported Branches:
+//   - BEQ, BNE
+//   - BLT, BGE
+//   - BLTU, BGEU
+//
+//   - JAL, JALR (Unconditional Branches)
+//
+// Notes:
+//   Branch resolution currently occurs in MEM stage.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module br_control (
+module mrv32_bru (
 
     input logic [1:0] br_sel,
     input logic [31:0] alu_result,
@@ -801,28 +852,26 @@ module br_control (
         endcase
     end
 
-endmodule/*
- * MRV32 Writeback (WB) Stage
- *
- * For the blocking (one-instruction-in-flight) MRV32 core.
- *
- * Responsibilities:
- *   - Select writeback data (rd_data) for the register file
- *   - Gate register writes (rf_wen) using wb_valid and reg_wen_in
- *   - Generate instr_accept (commit pulse) back to instruction fetch
- *   - Compute pc_next for instruction fetch (pc+4 or jump target)
- *
- * Supported WB sources (bring-up subset):
- *   - LUI   : rd_data = imm_in
- *   - JAL   : rd_data = pc_in + 4
- *   - LOAD  : rd_data = load_data_in
- *   - ALU   : rd_data = alu_result_in
- *
- * Notes:
- *   - This module is combinational; the wrapper should latch all *_in signals.
- *   - x0 write suppression is handled by the register file, but we also gate rf_wen
- *     with (rd_addr_in != 0) here for extra safety.
- */
+endmodule//==============================================================================
+// Module: mrv32_wb v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Writeback stage of the RV32I core.
+//
+// Responsibilities:
+//   - Select final writeback data (ALU, memory, immediate, PC+4)
+//   - Generate register file write enable and data
+//   - Compute next PC value
+//   - Assert instr_accept to allow next instruction fetch
+//
+// Notes:
+//   PC update occurs in this stage.
+//   Only one instruction is retired at a time in bring-up mode.
+//   Designed to support future pipelined execution.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 module mrv32_wb (
     // WB-stage valid token
@@ -888,7 +937,31 @@ module mrv32_wb (
     end
   end
 
-endmodule/*** Core Wrapper ***/
+endmodule//==============================================================================
+// Module: mrv32_core v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Single-issue RV32I core with staged pipeline registers.
+//   Only one instruction is allowed in flight at a time (serialized execution).
+//
+//   The design maintains IF/ID/EX/MEM/WB stage registers to provide a clean
+//   structural foundation for future conversion into a fully pipelined
+//   5-stage processor with hazard detection and forwarding.
+//
+// Architecture:
+//   - RV32I subset (no FENCE, ECALL, EBREAK or CSR instructions)
+//   - Branch resolved in MEM stage
+//   - PC updated in WB stage (single instruction in flight)
+//
+// Future Extensions:
+//   - Enable overlapping execution (true 5-stage pipeline)
+//   - Add hazard detection unit
+//   - Add forwarding paths
+//   - Add pipeline flush on branch
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 import mrv32_pkg::*;
 
@@ -924,7 +997,7 @@ logic [4:0] rf_waddr;
 logic [31:0] rf_wdata;
 
 /** Fetch **/
-instr_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_valid), .a_addr(a_addr),
+mrv32_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_valid), .a_addr(a_addr),
                 .a_wdata(a_wdata), .a_wstrb(a_wstrb), .a_rdata(a_rdata), .instr(instr_if), .pc(pc_if), .pc_next(pc_next),
                 .instr_valid(instr_valid_fetch), .instr_accept(instr_accept));
 
@@ -957,7 +1030,7 @@ logic [1:0] br_sel, br_sel_ex, br_sel_mem;
 logic [31:0] imm;
 
 /** Decode **/
-instr_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd_addr(rd_addr), .load_unsigned(load_unsigned),
+mrv32_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd_addr(rd_addr), .load_unsigned(load_unsigned),
                     .aluop(aluop), .alusrc(alusrc), .mem_ren(mem_ren), .mem_wen(mem_wen), .mem_wstrb(mem_wstrb), .br_sel(br_sel),
                     .reg_wen(reg_wen), .is_lui(is_lui), .is_auipc(is_auipc), .is_jalr(is_jalr), .imm(imm), .unsupported_instr(unsupported));
 
@@ -1005,13 +1078,13 @@ assign mem_valid_ex = reg_id_ex[0];
 
 logic [31:0] rs1_data, rs2_data, op2, alu_result;
 
-registerFile mrv_rf(.clk(clk), .rst_n(rst_n), .rs1_addr(rs1_addr_ex), .rs2_addr(rs2_addr_ex), .rd_addr(rf_waddr),
+mrv32_regfile mrv_rf(.clk(clk), .rst_n(rst_n), .rs1_addr(rs1_addr_ex), .rs2_addr(rs2_addr_ex), .rd_addr(rf_waddr),
                     .rd_data(rf_wdata), .reg_wen(rf_wen), .rs1_data(rs1_data), .rs2_data(rs2_data));
 
 assign op2 = alusrc_ex ? imm_ex : rs2_data;
 
 /** ALU (EX) **/
-alu mrv_alu(.op1(rs1_data), .op2(op2), .aluop(aluop_ex), .result(alu_result));
+mrv32_alu mrv_alu(.op1(rs1_data), .op2(op2), .aluop(aluop_ex), .result(alu_result));
 
 
 logic [4:0] rd_addr_mem;
@@ -1049,7 +1122,7 @@ assign alu_result_mem = reg_ex_mem[31:0];
 
 
 logic take_branch, take_branch_wb;
-br_control mrv_bru(.br_sel(br_sel_mem), .alu_result(alu_result_mem), .take_branch(take_branch));
+mrv32_bru mrv_bru(.br_sel(br_sel_mem), .alu_result(alu_result_mem), .take_branch(take_branch));
 
 
 logic lsu_done;

@@ -1,4 +1,28 @@
-/*** Core Wrapper ***/
+//==============================================================================
+// Module: mrv32_core v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Single-issue RV32I core with staged pipeline registers.
+//   Only one instruction is allowed in flight at a time (serialized execution).
+//
+//   The design maintains IF/ID/EX/MEM/WB stage registers to provide a clean
+//   structural foundation for future conversion into a fully pipelined
+//   5-stage processor with hazard detection and forwarding.
+//
+// Architecture:
+//   - RV32I subset (no FENCE, ECALL, EBREAK or CSR instructions)
+//   - Branch resolved in MEM stage
+//   - PC updated in WB stage (single instruction in flight)
+//
+// Future Extensions:
+//   - Enable overlapping execution (true 5-stage pipeline)
+//   - Add hazard detection unit
+//   - Add forwarding paths
+//   - Add pipeline flush on branch
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
 import mrv32_pkg::*;
 
@@ -34,7 +58,7 @@ logic [4:0] rf_waddr;
 logic [31:0] rf_wdata;
 
 /** Fetch **/
-instr_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_valid), .a_addr(a_addr),
+mrv32_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_valid), .a_addr(a_addr),
                 .a_wdata(a_wdata), .a_wstrb(a_wstrb), .a_rdata(a_rdata), .instr(instr_if), .pc(pc_if), .pc_next(pc_next),
                 .instr_valid(instr_valid_fetch), .instr_accept(instr_accept));
 
@@ -67,7 +91,7 @@ logic [1:0] br_sel, br_sel_ex, br_sel_mem;
 logic [31:0] imm;
 
 /** Decode **/
-instr_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd_addr(rd_addr), .load_unsigned(load_unsigned),
+mrv32_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd_addr(rd_addr), .load_unsigned(load_unsigned),
                     .aluop(aluop), .alusrc(alusrc), .mem_ren(mem_ren), .mem_wen(mem_wen), .mem_wstrb(mem_wstrb), .br_sel(br_sel),
                     .reg_wen(reg_wen), .is_lui(is_lui), .is_auipc(is_auipc), .is_jalr(is_jalr), .imm(imm), .unsupported_instr(unsupported));
 
@@ -115,13 +139,13 @@ assign mem_valid_ex = reg_id_ex[0];
 
 logic [31:0] rs1_data, rs2_data, op2, alu_result;
 
-registerFile mrv_rf(.clk(clk), .rst_n(rst_n), .rs1_addr(rs1_addr_ex), .rs2_addr(rs2_addr_ex), .rd_addr(rf_waddr),
+mrv32_regfile mrv_rf(.clk(clk), .rst_n(rst_n), .rs1_addr(rs1_addr_ex), .rs2_addr(rs2_addr_ex), .rd_addr(rf_waddr),
                     .rd_data(rf_wdata), .reg_wen(rf_wen), .rs1_data(rs1_data), .rs2_data(rs2_data));
 
 assign op2 = alusrc_ex ? imm_ex : rs2_data;
 
 /** ALU (EX) **/
-alu mrv_alu(.op1(rs1_data), .op2(op2), .aluop(aluop_ex), .result(alu_result));
+mrv32_alu mrv_alu(.op1(rs1_data), .op2(op2), .aluop(aluop_ex), .result(alu_result));
 
 
 logic [4:0] rd_addr_mem;
@@ -159,7 +183,7 @@ assign alu_result_mem = reg_ex_mem[31:0];
 
 
 logic take_branch, take_branch_wb;
-br_control mrv_bru(.br_sel(br_sel_mem), .alu_result(alu_result_mem), .take_branch(take_branch));
+mrv32_bru mrv_bru(.br_sel(br_sel_mem), .alu_result(alu_result_mem), .take_branch(take_branch));
 
 
 logic lsu_done;

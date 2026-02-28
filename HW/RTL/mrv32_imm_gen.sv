@@ -1,27 +1,25 @@
-/*
- * MRV32 Immediate Generator (RV32I)
- *
- * Generates a sign-extended immediate value from a 32-bit RISC-V instruction,
- * based on the immediate format selected by the decoder.
- *
- * Supported immediate formats:
- *   - I-type : instr[31:20]
- *   - S-type : {instr[31:25], instr[11:7]}
- *   - B-type : {instr[31], instr[7], instr[30:25], instr[11:8], 1'b0}
- *   - U-type : instr[31:12] << 12
- *   - J-type : {instr[31], instr[19:12], instr[20], instr[30:21], 1'b0}
- *
- * All immediates are sign-extended to 32 bits as defined by the RV32I ISA.
- *
- * Notes:
- * - This module is purely combinational.
- * - No instruction decoding is performed here; the decoder is responsible
- *   for selecting the correct immediate format via imm_sel.
- * - The module is reusable across single-cycle, multi-cycle, and pipelined
- *   implementations of the MRV32 core.
- */
+//==============================================================================
+// Module: mrv32_imm_gen v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Immediate value generator for RV32I instructions.
+//
+// Supported Formats:
+//   - I-type
+//   - S-type
+//   - B-type
+//   - U-type
+//   - J-type
+//
+// Notes:
+//   Immediate format selected via imm_sel control from decode stage.
+//   Outputs properly sign-extended 32-bit immediate.
+//
+// Author: Martim Bento
+// Date  : 28/02/2026
+//==============================================================================
 
-module imm_gen (
+module mrv32_imm_gen (
     input  logic [31:0] instr,
     input  logic [2:0]  imm_sel,
     output logic [31:0] imm
