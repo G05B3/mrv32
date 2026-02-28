@@ -67,6 +67,12 @@ package mrv32_pkg;
       IMM_U = 3'd3,
       IMM_J = 3'd4;
 
+  localparam logic [1:0]
+      BR_NONE   = 2'b00, // not a branch (default)
+      BR_ALWAYS = 2'b01, // unconditional jump (JAL/JALR)
+      BR_EQLT   = 2'b10, // branch (BEQ, BLT, BLTU)
+      BR_NQLT   = 2'b11; // branch (BNE, BGE, BGEU)
+
   // ----------------------------
   // Write strobe helpers (byte enables)
   // ----------------------------

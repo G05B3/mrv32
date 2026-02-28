@@ -6,7 +6,6 @@
  *   - ALU control: aluop + alusrc (selects imm vs rs2 as operand 2)
  *   - Memory control: mem_ren, mem_wen, mem_wstrb (byte enables)
  *   - Writeback control: reg_wen
- *   - Instruction class flags: is_lui, is_jal
  *   - A sign-extended immediate value (imm) via the imm_gen module
  *   - unsupported_instr flag for illegal/unsupported encodings
  *
@@ -38,11 +37,13 @@ module instr_decode(
     output logic        mem_ren,
     output logic        mem_wen,
     output logic [3:0]  mem_wstrb,
+    output logic        load_unsigned,
     output logic        reg_wen,
-    output logic [2:0]  f3,
 
     output logic        is_lui,
-    output logic        is_jal,
+    output logic        is_auipc,
+    output logic        is_jalr,
+    output logic [1:0]  br_sel,
 
     output logic [31:0] imm,
     output logic        unsupported_instr
@@ -52,6 +53,8 @@ module instr_decode(
   logic [6:0] opcode, funct7;
   logic [2:0] funct3;
   logic [2:0] imm_sel;
+  logic [1:0] funct3_upper;
+  logic funct3_lower;
 
     assign opcode   = instr[6:0];
     assign rd_addr  = instr[11:7];
@@ -59,8 +62,8 @@ module instr_decode(
     assign rs1_addr = instr[19:15];
     assign rs2_addr = instr[24:20];
     assign funct7   = instr[31:25];
-
-    assign f3       = instr[14:12];
+    assign funct3_upper = funct3[2:1];
+    assign funct3_lower = funct3[0];
 
   always_comb begin
 
@@ -71,9 +74,12 @@ module instr_decode(
     mem_ren          = 1'b0;
     mem_wen          = 1'b0;
     mem_wstrb        = 4'b0000;
+    load_unsigned    = 1'b0;
     reg_wen          = 1'b0;
     is_lui           = 1'b0;
-    is_jal           = 1'b0;
+    is_auipc         = 1'b0;
+    is_jalr          = 1'b0;
+    br_sel           = BR_NONE;
     unsupported_instr = 1'b0;
 
     case (opcode)
@@ -81,6 +87,12 @@ module instr_decode(
             is_lui  = 1'b1;
             reg_wen = (rd_addr != 5'd0);
             imm_sel = IMM_U;
+        end
+
+        OPCODE_AUIPC: begin // AUIPC
+            is_auipc = 1'b1;
+            reg_wen  = (rd_addr != 5'd0);
+            imm_sel  = IMM_U;
         end
 
         OPCODE_ITYPE: begin // I-TYPE (IMM OPs)
@@ -154,8 +166,8 @@ module instr_decode(
            3'b000: mem_wstrb = WSTRB_B; // LB
            3'b001: mem_wstrb = WSTRB_H; // LH
            3'b010: mem_wstrb = WSTRB_W; // LW
-           3'b100: mem_wstrb = WSTRB_B; // LBU
-           3'b101: mem_wstrb = WSTRB_H; // LHU
+           3'b100: begin mem_wstrb = WSTRB_B; load_unsigned = 1'b1; end // LBU
+           3'b101: begin mem_wstrb = WSTRB_H; load_unsigned = 1'b1; end// LHU
            default: begin
             mem_ren = 1'b0;
             unsupported_instr = 1'b1;
@@ -179,10 +191,33 @@ module instr_decode(
             endcase
         end
 
+        OPCODE_BTYPE: begin // B-TYPE (BRANCHES)
+            alusrc = 1'b0;
+            imm_sel = IMM_B;
+            br_sel = (funct3_lower) ? BR_NQLT : BR_EQLT; // BNE/BEQ, BLT/BGE, BLTU/BGEU
+            case(funct3_upper)
+            2'b00: aluop = ALU_SUB;  // BEQ  (000) or BNE  (001)
+            2'b10: aluop = ALU_SLT;  // BLT  (100) or BGE  (101)
+            2'b11: aluop = ALU_SLTU; // BLTU (110) or BGEU (111)
+            default: begin
+                unsupported_instr = 1'b0;
+            end
+            endcase
+        end
+
         OPCODE_JAL: begin // JAL
-            is_jal  = 1'b1;
+            br_sel = BR_ALWAYS;
             imm_sel = IMM_J;
             reg_wen = (rd_addr != 5'd0);
+        end
+
+        OPCODE_JALR: begin // JALR
+            is_jalr = 1'b1;
+            br_sel = BR_ALWAYS;
+            imm_sel = IMM_I;
+            reg_wen = (rd_addr != 5'd0);
+            alusrc = 1'b1; // op with IMM
+            aluop = ALU_ADD; // target addr = rs1 + imm
         end
 
         default: begin

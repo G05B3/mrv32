@@ -6,13 +6,12 @@ module mrv32_lsu (
     input  logic                  mem_ren,
     input  logic                  mem_wen,
     input  logic [3:0]            mem_wstrb,
-    input  logic [2:0]            load_funct3,
+    input  logic                  load_unsigned, // 1=zero-extend, 0=sign-extend
     input  logic [31:0]           eff_addr,
     input  logic [31:0]           store_data,
 
     output logic                  lsu_done,
-    //output logic [31:0]           load_data_q,       // registered, stable after response
-    output logic [31:0]           load_data,  // combinational, valid same cycle as lsu_done
+    output logic [31:0]           load_data,
 
     output logic                  b_valid,
     output logic [ADDR_WIDTH-1:0] b_addr,
@@ -71,16 +70,16 @@ module mrv32_lsu (
 
   // ----------------------------
   // Load alignment check
+  // Uses mem_wstrb to determine access size
   // ----------------------------
   logic ld_misaligned;
 
   always @* begin
-    ld_misaligned = 1'b1;
-    case (load_funct3)
-      3'b000, 3'b100: ld_misaligned = 1'b0;
-      3'b001, 3'b101: ld_misaligned = eff_addr[0];
-      3'b010:         ld_misaligned = (eff_addr[1:0] != 2'b00);
-      default:        ld_misaligned = 1'b1;
+    case (mem_wstrb)
+      WSTRB_B:   ld_misaligned = 1'b0;
+      WSTRB_H:   ld_misaligned = eff_addr[0];
+      WSTRB_W:   ld_misaligned = (eff_addr[1:0] != 2'b00);
+      default:   ld_misaligned = 1'b1;
     endcase
   end
 
@@ -91,7 +90,8 @@ module mrv32_lsu (
   state_t state, state_n;
 
   logic [31:0] addr_q;
-  logic [2:0]  f3_q;
+  logic [3:0]  wstrb_q;      // latched size for extraction
+  logic        unsigned_q;   // latched sign control
 
   always @* begin
     b_valid  = 1'b0;
@@ -145,29 +145,21 @@ module mrv32_lsu (
 
   // ----------------------------
   // Combinational load data output
-  // Valid on the same cycle lsu_done fires (WAIT_RD + b_rvalid)
-  // Core must use this to latch into reg_mem_wb
   // ----------------------------
   always @* begin
-    load_data = load_data_q; // default: hold registered value
+    load_data = load_data_q;
 
     if (state == WAIT_RD && b_rvalid) begin
-      logic [31:0] rshift_b;
-      logic [31:0] rshift_h;
       logic [7:0]  ld_byte;
       logic [15:0] ld_half;
 
-      rshift_b = b_rdata >> (8 * addr_q[1:0]);
-      ld_byte  = rshift_b[7:0];
-      rshift_h = b_rdata >> (8 * {addr_q[1], 1'b0});
-      ld_half  = rshift_h[15:0];
+      ld_byte = b_rdata >> (8 * addr_q[1:0]);
+      ld_half = b_rdata >> (8 * {addr_q[1], 1'b0});
 
-      case (f3_q)
-        3'b000: load_data = {{24{ld_byte[7]}}, ld_byte};
-        3'b100: load_data = {24'd0, ld_byte};
-        3'b001: load_data = {{16{ld_half[15]}}, ld_half};
-        3'b101: load_data = {16'd0, ld_half};
-        3'b010: load_data = b_rdata;
+      case (wstrb_q)
+        WSTRB_B: load_data = unsigned_q ? {24'd0, ld_byte} : {{24{ld_byte[7]}},  ld_byte};
+        WSTRB_H: load_data = unsigned_q ? {16'd0, ld_half} : {{16{ld_half[15]}}, ld_half};
+        WSTRB_W: load_data = b_rdata;
         default: load_data = 32'd0;
       endcase
     end
@@ -178,22 +170,23 @@ module mrv32_lsu (
   // ----------------------------
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      state     <= IDLE;
-      addr_q    <= 32'd0;
-      f3_q      <= 3'd0;
+      state      <= IDLE;
+      addr_q     <= 32'd0;
+      wstrb_q    <= WSTRB_NONE;
+      unsigned_q <= 1'b0;
       load_data_q <= 32'd0;
     end else begin
       state <= state_n;
 
       if (state == ISSUE && mem_ren && ram_hit && !ld_misaligned) begin
-        addr_q <= eff_addr;
-        f3_q   <= load_funct3;
+        addr_q     <= eff_addr;
+        wstrb_q    <= mem_wstrb;
+        unsigned_q <= load_unsigned;
       end
 
       if (state == ISSUE && mem_ren && (!ram_hit || ld_misaligned))
         load_data_q <= 32'd0;
 
-      // Register the combinational result for stability after response cycle
       if (state == WAIT_RD && b_rvalid)
         load_data_q <= load_data;
     end

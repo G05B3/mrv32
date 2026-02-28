@@ -29,7 +29,8 @@ module mrv32_wb (
     input  logic        reg_wen_in,
     input  logic        mem_ren_in,
     input  logic        is_lui_in,
-    input  logic        is_jal_in,
+    input  logic        is_auipc_in,
+    input  logic        take_branch,
 
     input  logic [4:0]  rd_addr_in,
 
@@ -63,13 +64,15 @@ module mrv32_wb (
       // Commit this instruction (blocking core)
       instr_accept = 1'b1;
 
-      // Next PC: sequential unless JAL
-      if (is_jal_in) pc_next = jal_target_in;
+      // Next PC: sequential unless JAL or JALR
+      if (take_branch) pc_next = jal_target_in;
 
       // Writeback mux
       if (is_lui_in) begin
         rf_wdata = imm_in;
-      end else if (is_jal_in) begin
+      end else if (is_auipc_in) begin
+        rf_wdata = imm_in + pc_in;
+      end else if (take_branch) begin
         rf_wdata = pc_in + 32'd4;
       end else if (mem_ren_in) begin
         rf_wdata = load_data_in;

@@ -67,6 +67,12 @@ package mrv32_pkg;
       IMM_U = 3'd3,
       IMM_J = 3'd4;
 
+  localparam logic [1:0]
+      BR_NONE   = 2'b00, // not a branch (default)
+      BR_ALWAYS = 2'b01, // unconditional jump (JAL/JALR)
+      BR_EQLT   = 2'b10, // branch (BEQ, BLT, BLTU)
+      BR_NQLT   = 2'b11; // branch (BNE, BGE, BGEU)
+
   // ----------------------------
   // Write strobe helpers (byte enables)
   // ----------------------------
@@ -256,7 +262,6 @@ endmodule/*
  *   - ALU control: aluop + alusrc (selects imm vs rs2 as operand 2)
  *   - Memory control: mem_ren, mem_wen, mem_wstrb (byte enables)
  *   - Writeback control: reg_wen
- *   - Instruction class flags: is_lui, is_jal
  *   - A sign-extended immediate value (imm) via the imm_gen module
  *   - unsupported_instr flag for illegal/unsupported encodings
  *
@@ -288,11 +293,13 @@ module instr_decode(
     output logic        mem_ren,
     output logic        mem_wen,
     output logic [3:0]  mem_wstrb,
+    output logic        load_unsigned,
     output logic        reg_wen,
-    output logic [2:0]  f3,
 
     output logic        is_lui,
-    output logic        is_jal,
+    output logic        is_auipc,
+    output logic        is_jalr,
+    output logic [1:0]  br_sel,
 
     output logic [31:0] imm,
     output logic        unsupported_instr
@@ -302,6 +309,8 @@ module instr_decode(
   logic [6:0] opcode, funct7;
   logic [2:0] funct3;
   logic [2:0] imm_sel;
+  logic [1:0] funct3_upper;
+  logic funct3_lower;
 
     assign opcode   = instr[6:0];
     assign rd_addr  = instr[11:7];
@@ -309,8 +318,8 @@ module instr_decode(
     assign rs1_addr = instr[19:15];
     assign rs2_addr = instr[24:20];
     assign funct7   = instr[31:25];
-
-    assign f3       = instr[14:12];
+    assign funct3_upper = funct3[2:1];
+    assign funct3_lower = funct3[0];
 
   always_comb begin
 
@@ -321,9 +330,12 @@ module instr_decode(
     mem_ren          = 1'b0;
     mem_wen          = 1'b0;
     mem_wstrb        = 4'b0000;
+    load_unsigned    = 1'b0;
     reg_wen          = 1'b0;
     is_lui           = 1'b0;
-    is_jal           = 1'b0;
+    is_auipc         = 1'b0;
+    is_jalr          = 1'b0;
+    br_sel           = BR_NONE;
     unsupported_instr = 1'b0;
 
     case (opcode)
@@ -331,6 +343,12 @@ module instr_decode(
             is_lui  = 1'b1;
             reg_wen = (rd_addr != 5'd0);
             imm_sel = IMM_U;
+        end
+
+        OPCODE_AUIPC: begin // AUIPC
+            is_auipc = 1'b1;
+            reg_wen  = (rd_addr != 5'd0);
+            imm_sel  = IMM_U;
         end
 
         OPCODE_ITYPE: begin // I-TYPE (IMM OPs)
@@ -401,7 +419,11 @@ module instr_decode(
            imm_sel = IMM_I;
            aluop = ALU_ADD;
            case (funct3)
+           3'b000: mem_wstrb = WSTRB_B; // LB
+           3'b001: mem_wstrb = WSTRB_H; // LH
            3'b010: mem_wstrb = WSTRB_W; // LW
+           3'b100: begin mem_wstrb = WSTRB_B; load_unsigned = 1'b1; end // LBU
+           3'b101: begin mem_wstrb = WSTRB_H; load_unsigned = 1'b1; end// LHU
            default: begin
             mem_ren = 1'b0;
             unsupported_instr = 1'b1;
@@ -425,10 +447,33 @@ module instr_decode(
             endcase
         end
 
+        OPCODE_BTYPE: begin // B-TYPE (BRANCHES)
+            alusrc = 1'b0;
+            imm_sel = IMM_B;
+            br_sel = (funct3_lower) ? BR_NQLT : BR_EQLT; // BNE/BEQ, BLT/BGE, BLTU/BGEU
+            case(funct3_upper)
+            2'b00: aluop = ALU_SUB;  // BEQ  (000) or BNE  (001)
+            2'b10: aluop = ALU_SLT;  // BLT  (100) or BGE  (101)
+            2'b11: aluop = ALU_SLTU; // BLTU (110) or BGEU (111)
+            default: begin
+                unsupported_instr = 1'b0;
+            end
+            endcase
+        end
+
         OPCODE_JAL: begin // JAL
-            is_jal  = 1'b1;
+            br_sel = BR_ALWAYS;
             imm_sel = IMM_J;
             reg_wen = (rd_addr != 5'd0);
+        end
+
+        OPCODE_JALR: begin // JALR
+            is_jalr = 1'b1;
+            br_sel = BR_ALWAYS;
+            imm_sel = IMM_I;
+            reg_wen = (rd_addr != 5'd0);
+            alusrc = 1'b1; // op with IMM
+            aluop = ALU_ADD; // target addr = rs1 + imm
         end
 
         default: begin
@@ -539,42 +584,21 @@ module alu (
     endcase
   end
 
-endmodule/*
- * MRV32 Load/Store Unit (LSU) - Bring-up Skeleton
- *
- * - Consumes 32-bit effective address from ALU (no address calculation here).
- * - Talks to dual_port_byte_mem Port B using valid/rvalid.
- * - RAM-only for now: addresses outside [0 .. MEM_BYTES-1] are ignored.
- * - Misaligned accesses are ignored for now (later: trap).
- *
- * Stores:
- *   - Uses mem_wstrb encoding from mrv32_pkg (WSTRB_B/H/W).
- *   - Lane shifting is implemented so SB/SH can be enabled later without refactor.
- *
- * Loads:
- *   - Request/response skeleton is implemented (waits for b_rvalid).
- *   - Extraction/extend is implemented based on load_funct3.
- *   - If ignored/unmapped/misaligned: returns 0.
- */
-
-module mrv32_lsu (
+endmodulemodule mrv32_lsu (
     input  logic                  clk,
     input  logic                  rst_n,
 
-    // Core request (MEM stage)
-    input  logic                  mem_valid,      // Valid if either read or write; in the wrapper define this logic
+    input  logic                  mem_valid,
     input  logic                  mem_ren,
     input  logic                  mem_wen,
-    input  logic [3:0]            mem_wstrb,      // WSTRB_B/H/W
-    input  logic [2:0]            load_funct3,    // 000 LB,001 LH,010 LW,100 LBU,101 LHU
-    input  logic [31:0]           eff_addr,       // ALU result
-    input  logic [31:0]           store_data,     // rs2
+    input  logic [3:0]            mem_wstrb,
+    input  logic                  load_unsigned, // 1=zero-extend, 0=sign-extend
+    input  logic [31:0]           eff_addr,
+    input  logic [31:0]           store_data,
 
-    // Core response
-    output logic                  lsu_done,       // 1-cycle pulse
-    output logic [31:0]           load_data,      // valid when a load completes (else 0)
+    output logic                  lsu_done,
+    output logic [31:0]           load_data,
 
-    // Memory Port B
     output logic                  b_valid,
     output logic [ADDR_WIDTH-1:0] b_addr,
     output logic [31:0]           b_wdata,
@@ -584,11 +608,9 @@ module mrv32_lsu (
 );
   import mrv32_pkg::*;
 
-  // RAM-only map, base = 0
   logic ram_hit;
-  always @* begin
-    ram_hit = (eff_addr < MEM_BYTES);
-  end
+  logic [31:0] load_data_q;
+  always @* ram_hit = (eff_addr < MEM_BYTES);
 
   assign b_addr = eff_addr[ADDR_WIDTH-1:0];
 
@@ -608,73 +630,60 @@ module mrv32_lsu (
       WSTRB_B: begin
         st_misaligned = 1'b0;
         case (eff_addr[1:0])
-          2'd0: begin st_wdata = {24'd0, store_data[7:0]};               st_wstrb = 4'b0001; end
-          2'd1: begin st_wdata = {16'd0, store_data[7:0], 8'd0};         st_wstrb = 4'b0010; end
-          2'd2: begin st_wdata = { 8'd0, store_data[7:0], 16'd0};        st_wstrb = 4'b0100; end
-          2'd3: begin st_wdata = {       store_data[7:0], 24'd0};        st_wstrb = 4'b1000; end
+          2'd0: begin st_wdata = {24'd0, store_data[7:0]};        st_wstrb = 4'b0001; end
+          2'd1: begin st_wdata = {16'd0, store_data[7:0],  8'd0}; st_wstrb = 4'b0010; end
+          2'd2: begin st_wdata = { 8'd0, store_data[7:0], 16'd0}; st_wstrb = 4'b0100; end
+          2'd3: begin st_wdata = {store_data[7:0], 24'd0};        st_wstrb = 4'b1000; end
         endcase
       end
-
       WSTRB_H: begin
         st_misaligned = eff_addr[0];
         if (!eff_addr[0]) begin
           case (eff_addr[1])
-            1'b0: begin st_wdata = {16'd0, store_data[15:0]};            st_wstrb = 4'b0011; end
-            1'b1: begin st_wdata = {      store_data[15:0], 16'd0};      st_wstrb = 4'b1100; end
+            1'b0: begin st_wdata = {16'd0, store_data[15:0]}; st_wstrb = 4'b0011; end
+            1'b1: begin st_wdata = {store_data[15:0], 16'd0}; st_wstrb = 4'b1100; end
           endcase
         end
       end
-
       WSTRB_W: begin
         st_misaligned = (eff_addr[1:0] != 2'b00);
         st_wdata      = store_data;
         st_wstrb      = WSTRB_W;
       end
-
-      default: begin
-        // illegal / none => keep defaults (treated as ignored)
-      end
+      default: ;
     endcase
   end
 
   // ----------------------------
   // Load alignment check
+  // Uses mem_wstrb to determine access size
   // ----------------------------
   logic ld_misaligned;
 
   always @* begin
-    ld_misaligned = 1'b1;
-    case (load_funct3)
-      3'b000, 3'b100: ld_misaligned = 1'b0;                 // LB/LBU
-      3'b001, 3'b101: ld_misaligned = eff_addr[0];          // LH/LHU
-      3'b010:         ld_misaligned = (eff_addr[1:0]!=2'b00);// LW
-      default:        ld_misaligned = 1'b1;
+    case (mem_wstrb)
+      WSTRB_B:   ld_misaligned = 1'b0;
+      WSTRB_H:   ld_misaligned = eff_addr[0];
+      WSTRB_W:   ld_misaligned = (eff_addr[1:0] != 2'b00);
+      default:   ld_misaligned = 1'b1;
     endcase
   end
 
   // ----------------------------
-  // FSM
+  // FSM: IDLE -> ISSUE -> WAIT_RD
   // ----------------------------
   typedef enum logic [1:0] {IDLE, ISSUE, WAIT_RD} state_t;
   state_t state, state_n;
 
-  // Latched metadata for loads (used when response returns)
   logic [31:0] addr_q;
-  logic [2:0]  f3_q;
+  logic [3:0]  wstrb_q;      // latched size for extraction
+  logic        unsigned_q;   // latched sign control
 
-  // Extracted pieces from returned word
-  logic [31:0] rshift_b;
-  logic [31:0] rshift_h;
-  logic [7:0]  ld_byte;
-  logic [15:0] ld_half;
-
-  // Outputs default
   always @* begin
     b_valid  = 1'b0;
     b_wdata  = 32'd0;
     b_wstrb  = WSTRB_NONE;
     lsu_done = 1'b0;
-
     state_n  = state;
 
     case (state)
@@ -683,13 +692,10 @@ module mrv32_lsu (
       end
 
       ISSUE: begin
-        // Unmapped => ignore and complete
         if (!ram_hit) begin
           lsu_done = 1'b1;
           state_n  = IDLE;
-
         end else if (mem_wen) begin
-          // Store => enqueue if aligned/legal, then complete immediately
           if (!st_misaligned && (st_wstrb != WSTRB_NONE)) begin
             b_valid = 1'b1;
             b_wdata = st_wdata;
@@ -697,21 +703,16 @@ module mrv32_lsu (
           end
           lsu_done = 1'b1;
           state_n  = IDLE;
-          //$display("STORE: addr=%h data=%h wen=%b, valid=%b", b_addr, b_wdata, mem_wen, b_valid);
-
         end else if (mem_ren) begin
-          // Load => if misaligned ignore, else enqueue and wait
           if (ld_misaligned) begin
             lsu_done = 1'b1;
             state_n  = IDLE;
           end else begin
-            b_valid = 1'b1;       // read request
-            b_wstrb = WSTRB_NONE; // read
+            b_valid = 1'b1;
+            b_wstrb = WSTRB_NONE;
             state_n = WAIT_RD;
           end
-
         end else begin
-          // no-op
           lsu_done = 1'b1;
           state_n  = IDLE;
         end
@@ -723,51 +724,82 @@ module mrv32_lsu (
           state_n  = IDLE;
         end
       end
+
+      default: state_n = IDLE;
     endcase
   end
 
-  // State + load_data registers
+  // ----------------------------
+  // Combinational load data output
+  // ----------------------------
+  always @* begin
+    load_data = load_data_q;
+
+    if (state == WAIT_RD && b_rvalid) begin
+      logic [7:0]  ld_byte;
+      logic [15:0] ld_half;
+
+      ld_byte = b_rdata >> (8 * addr_q[1:0]);
+      ld_half = b_rdata >> (8 * {addr_q[1], 1'b0});
+
+      case (wstrb_q)
+        WSTRB_B: load_data = unsigned_q ? {24'd0, ld_byte} : {{24{ld_byte[7]}},  ld_byte};
+        WSTRB_H: load_data = unsigned_q ? {16'd0, ld_half} : {{16{ld_half[15]}}, ld_half};
+        WSTRB_W: load_data = b_rdata;
+        default: load_data = 32'd0;
+      endcase
+    end
+  end
+
+  // ----------------------------
+  // State + registered load_data
+  // ----------------------------
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      state     <= IDLE;
-      addr_q    <= 32'd0;
-      f3_q      <= 3'd0;
-      load_data <= 32'd0;
+      state      <= IDLE;
+      addr_q     <= 32'd0;
+      wstrb_q    <= WSTRB_NONE;
+      unsigned_q <= 1'b0;
+      load_data_q <= 32'd0;
     end else begin
       state <= state_n;
 
-      // Latch metadata when issuing a load that will wait
-      if (state == ISSUE && mem_valid && mem_ren && ram_hit && !ld_misaligned) begin
-        addr_q <= eff_addr;
-        f3_q   <= load_funct3;
+      if (state == ISSUE && mem_ren && ram_hit && !ld_misaligned) begin
+        addr_q     <= eff_addr;
+        wstrb_q    <= mem_wstrb;
+        unsigned_q <= load_unsigned;
       end
 
-      // For ignored loads, return 0
-      if (state == ISSUE && mem_valid && mem_ren && (!ram_hit || ld_misaligned)) begin
-        load_data <= 32'd0;
-      end
+      if (state == ISSUE && mem_ren && (!ram_hit || ld_misaligned))
+        load_data_q <= 32'd0;
 
-      // On response, extract/extend
-      if (state == WAIT_RD && b_rvalid) begin
-        // byte extract
-        rshift_b = (b_rdata >> (8*addr_q[1:0]));
-        ld_byte  = rshift_b[7:0];
-
-        // half extract (aligned to 0 or 2)
-        rshift_h = (b_rdata >> (8*{addr_q[1],1'b0}));
-        ld_half  = rshift_h[15:0];
-
-        case (f3_q)
-          3'b000: load_data <= {{24{ld_byte[7]}}, ld_byte};   // LB
-          3'b100: load_data <= {24'd0, ld_byte};              // LBU
-          3'b001: load_data <= {{16{ld_half[15]}}, ld_half};  // LH
-          3'b101: load_data <= {16'd0, ld_half};              // LHU
-          3'b010: load_data <= b_rdata;                       // LW
-          default: load_data <= 32'd0;
-        endcase
-      end
+      if (state == WAIT_RD && b_rvalid)
+        load_data_q <= load_data;
     end
   end
+
+endmodule/** MRV32 Branch Control Unit **/
+
+module br_control (
+
+    input logic [1:0] br_sel,
+    input logic [31:0] alu_result,
+    output logic take_branch
+
+);
+
+    logic is_Zero;
+    assign is_Zero = alu_result == 32'd0;
+
+    always_comb begin
+        case (br_sel)
+            2'b00: take_branch = 1'b0; // not a branch
+            2'b01: take_branch = 1'b1; // unconditional jump (JAL/JALR)
+            2'b10: take_branch = is_Zero ? 1'b1 : 1'b0; // branch (BEQ, BLT, BLTU)
+            2'b11: take_branch = is_Zero ? 1'b0 : 1'b1; // branch (BNE, BGE, BGEU)
+            default: take_branch = 1'b0;
+        endcase
+    end
 
 endmodule/*
  * MRV32 Writeback (WB) Stage
@@ -800,7 +832,8 @@ module mrv32_wb (
     input  logic        reg_wen_in,
     input  logic        mem_ren_in,
     input  logic        is_lui_in,
-    input  logic        is_jal_in,
+    input  logic        is_auipc_in,
+    input  logic        take_branch,
 
     input  logic [4:0]  rd_addr_in,
 
@@ -834,13 +867,15 @@ module mrv32_wb (
       // Commit this instruction (blocking core)
       instr_accept = 1'b1;
 
-      // Next PC: sequential unless JAL
-      if (is_jal_in) pc_next = jal_target_in;
+      // Next PC: sequential unless JAL or JALR
+      if (take_branch) pc_next = jal_target_in;
 
       // Writeback mux
       if (is_lui_in) begin
         rf_wdata = imm_in;
-      end else if (is_jal_in) begin
+      end else if (is_auipc_in) begin
+        rf_wdata = imm_in + pc_in;
+      end else if (take_branch) begin
         rf_wdata = pc_in + 32'd4;
       end else if (mem_ren_in) begin
         rf_wdata = load_data_in;
@@ -916,51 +951,54 @@ logic alusrc; // 1 => use immediate for op2
 logic mem_ren, mem_wen, mem_valid;
 logic [3:0] mem_wstrb;
 logic reg_wen;
-logic is_lui, is_jal, unsupported;
+logic is_lui, is_auipc, is_jalr, unsupported;
+logic [1:0] br_sel, br_sel_ex, br_sel_mem;
 
 logic [31:0] imm;
 
 /** Decode **/
-instr_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd_addr(rd_addr), .f3(f3),
-                    .aluop(aluop), .alusrc(alusrc), .mem_ren(mem_ren), .mem_wen(mem_wen), .mem_wstrb(mem_wstrb),
-                    .reg_wen(reg_wen), .is_lui(is_lui), .is_jal(is_jal), .imm(imm), .unsupported_instr(unsupported));
+instr_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd_addr(rd_addr), .load_unsigned(load_unsigned),
+                    .aluop(aluop), .alusrc(alusrc), .mem_ren(mem_ren), .mem_wen(mem_wen), .mem_wstrb(mem_wstrb), .br_sel(br_sel),
+                    .reg_wen(reg_wen), .is_lui(is_lui), .is_auipc(is_auipc), .is_jalr(is_jalr), .imm(imm), .unsupported_instr(unsupported));
 
 assign instr_valid_decode = iv_if_id & ~unsupported;
 assign mem_valid = mem_ren | mem_wen; // if either load or store then it's a mem op
 assign unsupported_instr = unsupported & iv_if_id;
 
-logic [2:0] f3, f3_ex;
+logic load_unsigned, load_unsigned_ex, is_jalr_ex;
 logic [4:0] rs1_addr_ex, rs2_addr_ex, rd_addr_ex;
 logic [3:0] aluop_ex;
 logic [3:0] mem_wstrb_ex;
-logic alusrc_ex, mem_ren_ex, mem_wen_ex, reg_wen_ex, is_lui_ex, mem_valid_ex, instr_valid_ex;
+logic alusrc_ex, mem_ren_ex, mem_wen_ex, reg_wen_ex, is_lui_ex, is_auipc_ex, mem_valid_ex, instr_valid_ex;
 logic [31:0] imm_ex;
 
-logic [97:0] reg_id_ex;
+logic [98:0] reg_id_ex;
 // Stage Register between ID and EX
 always_ff @(posedge clk) begin
     if (!rst_n)
         reg_id_ex <= 0;
     else if (!stall)
-        reg_id_ex <= {pc_id, instr_valid_decode,
-        f3, rs1_addr, rs2_addr, rd_addr, aluop, alusrc, mem_ren, mem_wen, mem_wstrb, reg_wen, is_lui, is_jal, imm,
+        reg_id_ex <= {br_sel, is_jalr, is_auipc, pc_id, instr_valid_decode,
+        load_unsigned, rs1_addr, rs2_addr, rd_addr, aluop, alusrc, mem_ren, mem_wen, mem_wstrb, reg_wen, is_lui, imm,
         mem_valid};
 end
 
-assign pc_ex = reg_id_ex[97:66];
-assign instr_valid_ex = reg_id_ex[65];
-assign f3_ex        = reg_id_ex[64:62];
-assign rs1_addr_ex  = reg_id_ex[61:57];
-assign rs2_addr_ex  = reg_id_ex[56:52];
-assign rd_addr_ex   = reg_id_ex[51:47];
-assign aluop_ex     = reg_id_ex[46:43];
-assign alusrc_ex    = reg_id_ex[42];
-assign mem_ren_ex   = reg_id_ex[41];
-assign mem_wen_ex   = reg_id_ex[40];
-assign mem_wstrb_ex = reg_id_ex[39:36];
-assign reg_wen_ex   = reg_id_ex[35];
-assign is_lui_ex    = reg_id_ex[34];
-assign is_jal_ex    = reg_id_ex[33];
+assign br_sel_ex = reg_id_ex[98:97];
+assign is_jalr_ex = reg_id_ex[96];
+assign is_auipc_ex = reg_id_ex[95];
+assign pc_ex = reg_id_ex[94:63];
+assign instr_valid_ex = reg_id_ex[62];
+assign load_unsigned_ex = reg_id_ex[61];
+assign rs1_addr_ex  = reg_id_ex[60:56];
+assign rs2_addr_ex  = reg_id_ex[55:51];
+assign rd_addr_ex   = reg_id_ex[50:46];
+assign aluop_ex     = reg_id_ex[45:42];
+assign alusrc_ex    = reg_id_ex[41];
+assign mem_ren_ex   = reg_id_ex[40];
+assign mem_wen_ex   = reg_id_ex[39];
+assign mem_wstrb_ex = reg_id_ex[38:35];
+assign reg_wen_ex   = reg_id_ex[34];
+assign is_lui_ex    = reg_id_ex[33];
 assign imm_ex       = reg_id_ex[32:1];
 assign mem_valid_ex = reg_id_ex[0];
 
@@ -977,36 +1015,41 @@ alu mrv_alu(.op1(rs1_data), .op2(op2), .aluop(aluop_ex), .result(alu_result));
 
 
 logic [4:0] rd_addr_mem;
-logic mem_ren_mem, mem_wen_mem, mem_valid_mem, reg_wen_mem, is_lui_mem, is_jal_mem, instr_valid_mem;
+logic mem_ren_mem, mem_wen_mem, mem_valid_mem, reg_wen_mem, is_lui_mem, is_auipc_mem, instr_valid_mem;
 logic [3:0] mem_wstrb_mem;
 logic [31:0] alu_result_mem, imm_mem, rs2_mem;
-logic [2:0] f3_mem;
-
-logic [146:0] reg_ex_mem;
+logic load_unsigned_mem, is_jalr_mem;
+logic [147:0] reg_ex_mem;
 // Stage Register between EX and MEM
 always_ff @(posedge clk) begin
     if (!rst_n)
         reg_ex_mem <= 0;
     else if (!stall)
-        reg_ex_mem <= {rs2_data, pc_ex, imm_ex, instr_valid_ex,
-        f3_ex, rd_addr_ex, mem_ren_ex, mem_wen_ex, mem_wstrb_ex, reg_wen_ex, is_lui_ex, is_jal_ex, mem_valid_ex,
+        reg_ex_mem <= {br_sel_ex, is_jalr_ex, is_auipc_ex, rs2_data, pc_ex, imm_ex, instr_valid_ex,
+        load_unsigned_ex, rd_addr_ex, mem_ren_ex, mem_wen_ex, mem_wstrb_ex, reg_wen_ex, is_lui_ex, mem_valid_ex,
         alu_result};
 end
 
-assign rs2_mem = reg_ex_mem[146:115];
-assign pc_mem = reg_ex_mem[114:83];
-assign imm_mem = reg_ex_mem[82:51];
-assign instr_valid_mem = reg_ex_mem[50];
-assign f3_mem      = reg_ex_mem[49:47];
-assign rd_addr_mem = reg_ex_mem[46:42];
-assign mem_ren_mem = reg_ex_mem[41];
-assign mem_wen_mem = reg_ex_mem[40];
-assign mem_wstrb_mem = reg_ex_mem[39:36];
-assign reg_wen_mem = reg_ex_mem[35];
-assign is_lui_mem = reg_ex_mem[34];
-assign is_jal_mem = reg_ex_mem[33];
+assign br_sel_mem = reg_ex_mem[147:146];
+assign is_jalr_mem = reg_ex_mem[145];
+assign is_auipc_mem = reg_ex_mem[144];
+assign rs2_mem = reg_ex_mem[143:112];
+assign pc_mem = reg_ex_mem[111:80];
+assign imm_mem = reg_ex_mem[79:48];
+assign instr_valid_mem = reg_ex_mem[47];
+assign load_unsigned_mem = reg_ex_mem[46];
+assign rd_addr_mem = reg_ex_mem[45:41];
+assign mem_ren_mem = reg_ex_mem[40];
+assign mem_wen_mem = reg_ex_mem[39];
+assign mem_wstrb_mem = reg_ex_mem[38:35];
+assign reg_wen_mem = reg_ex_mem[34];
+assign is_lui_mem = reg_ex_mem[33];
 assign mem_valid_mem = reg_ex_mem[32];
 assign alu_result_mem = reg_ex_mem[31:0];
+
+
+logic take_branch, take_branch_wb;
+br_control mrv_bru(.br_sel(br_sel_mem), .alu_result(alu_result_mem), .take_branch(take_branch));
 
 
 logic lsu_done;
@@ -1015,7 +1058,7 @@ logic [31:0] load_data;
 /** LSU (MEM) **/
 mrv32_lsu lsu(.clk(clk), .rst_n(rst_n), .b_valid(b_valid), .b_addr(b_addr), .b_wdata(b_wdata), .b_wstrb(b_wstrb),
               .b_rdata(b_rdata), .b_rvalid(b_rvalid), .mem_valid(mem_valid_mem), .mem_ren(mem_ren_mem),
-              .mem_wen(mem_wen_mem), .mem_wstrb(mem_wstrb_mem), .load_funct3(f3_mem), .eff_addr(alu_result_mem),
+              .mem_wen(mem_wen_mem), .mem_wstrb(mem_wstrb_mem), .load_unsigned(load_unsigned_mem), .eff_addr(alu_result_mem),
               .lsu_done(lsu_done), .load_data(load_data), .store_data(rs2_mem));
 
 logic stall; // 1 => stall the pipeline
@@ -1023,38 +1066,40 @@ logic stall; // 1 => stall the pipeline
 assign stall = mem_valid_mem & !lsu_done;
 
 logic [4:0] rd_addr_wb;
-logic instr_valid_wb, reg_wen_wb, is_lui_wb, is_jal_wb, mem_ren_wb;
+logic instr_valid_wb, reg_wen_wb, is_lui_wb, is_auipc_wb, mem_ren_wb, is_jalr_wb;
 logic [31:0] alu_result_wb, load_data_wb, imm_wb;
 
 logic true_instr_valid;
 assign true_instr_valid = instr_valid_mem & (!mem_valid_mem | lsu_done);
 
-logic [137:0] reg_mem_wb;
+logic [139:0] reg_mem_wb;
 // Stage Register between MEM and WB
 always_ff @(posedge clk) begin
     if (!rst_n)
         reg_mem_wb <= 0;
     else if (!stall)
-        reg_mem_wb <= {pc_mem, imm_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, is_lui_mem, is_jal_mem, alu_result_mem, load_data};
+        reg_mem_wb <= {take_branch, is_jalr_mem, is_auipc_mem, pc_mem, imm_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, is_lui_mem, alu_result_mem, load_data};
 end
 
-assign pc_wb = reg_mem_wb[137:106];
-assign imm_wb = reg_mem_wb[105:74];
-assign mem_ren_wb = reg_mem_wb[73];
-assign instr_valid_wb = reg_mem_wb[72];
-assign rd_addr_wb = reg_mem_wb[71:67];
-assign reg_wen_wb = reg_mem_wb[66];
-assign is_lui_wb = reg_mem_wb[65];
-assign is_jal_wb = reg_mem_wb[64];
+assign take_branch_wb = reg_mem_wb[139];
+assign is_jalr_wb = reg_mem_wb[138];
+assign is_auipc_wb = reg_mem_wb[137];
+assign pc_wb = reg_mem_wb[136:105];
+assign imm_wb = reg_mem_wb[104:73];
+assign mem_ren_wb = reg_mem_wb[72];
+assign instr_valid_wb = reg_mem_wb[71];
+assign rd_addr_wb = reg_mem_wb[70:66];
+assign reg_wen_wb = reg_mem_wb[65];
+assign is_lui_wb = reg_mem_wb[64];
 assign alu_result_wb = reg_mem_wb[63:32];
 assign load_data_wb = reg_mem_wb[31:0];
 
 logic [31:0] jal_target;
-assign jal_target = pc_wb + imm_wb;
+assign jal_target = is_jalr_wb ? (alu_result_wb & ~32'd1) : (pc_wb + imm_wb);
 
 /** Write Back **/
 mrv32_wb wb(.wb_valid(instr_valid_wb), .reg_wen_in(reg_wen_wb), .mem_ren_in(mem_ren_wb), .is_lui_in(is_lui_wb),
-            .is_jal_in(is_jal_wb), .rd_addr_in(rd_addr_wb), .alu_result_in(alu_result_wb), .load_data_in(load_data_wb),
+            .is_auipc_in(is_auipc_wb), .take_branch(take_branch_wb),.rd_addr_in(rd_addr_wb), .alu_result_in(alu_result_wb), .load_data_in(load_data_wb),
             .imm_in(imm_wb), .pc_in(pc_wb), .jal_target_in(jal_target),
             .instr_accept(instr_accept), .pc_next(pc_next), .rf_wen(rf_wen), .rf_waddr(rf_waddr), .rf_wdata(rf_wdata));
 
