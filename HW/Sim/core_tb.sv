@@ -6,7 +6,7 @@ module core_tb;
   // Parameters
   // -------------------------
   localparam integer RD_LATENCY = 2;
-  localparam integer MAX_CYCLES = 500;
+  localparam integer MAX_CYCLES = 10000;
 
   // -------------------------
   // Clock / Reset
@@ -55,6 +55,10 @@ module core_tb;
     end
     if (rst_n && trace_retire && core.instr_valid_mem) begin
         $display("[CYCLE %0d] MEM | stall=%b, lsu_done=%b, waddr=%h, ld=%h",cycle,core.stall, core.lsu_done, core.b_addr, core.lsu.load_data);
+    end
+    if (rst_n && trace_retire) begin
+      $display("[cycle %0d] aluop=%d, rs1_addr=%h, rs1_val=%h, rs2_addr=%H, rs2_val=%h, branch taken=%b, br_sel=%h, br_sel_mem=%h, z=%h",cycle,
+      core.aluop_ex, core.rs1_addr, core.rs1_data, core.rs2_addr, core.rs2_data, core.take_branch, core.br_sel_ex, core.br_sel_mem, core.mrv_bru.is_Zero);
     end
   end
 
@@ -155,7 +159,7 @@ module core_tb;
     $display("=======================================\n");
 
     dump_registers();
-    dump_memory(32'h0000ffc, 64);
+    dump_memory(32'h000fff00, 264);
 
     $finish;
   end

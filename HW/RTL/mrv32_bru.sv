@@ -19,7 +19,7 @@
 //   Branch resolution currently occurs in MEM stage.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_bru (
@@ -37,8 +37,8 @@ module mrv32_bru (
         case (br_sel)
             2'b00: take_branch = 1'b0; // not a branch
             2'b01: take_branch = 1'b1; // unconditional jump (JAL/JALR)
-            2'b10: take_branch = is_Zero ? 1'b1 : 1'b0; // branch (BEQ, BLT, BLTU)
-            2'b11: take_branch = is_Zero ? 1'b0 : 1'b1; // branch (BNE, BGE, BGEU)
+            2'b10: take_branch = is_Zero ? 1'b1 : 1'b0; // branch (BEQ, BGE, BGEU)
+            2'b11: take_branch = is_Zero ? 1'b0 : 1'b1; // branch (BNE, BLT, BLTU)
             default: take_branch = 1'b0;
         endcase
     end

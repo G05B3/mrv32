@@ -16,7 +16,7 @@
 //   across all modules.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 package mrv32_pkg;
@@ -105,7 +105,7 @@ endpackage : mrv32_pkg
 //   - instr_valid / instr_accept handshake with WB
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 import mrv32_pkg::*;
@@ -230,7 +230,7 @@ endmodule//=====================================================================
 //   Outputs properly sign-extended 32-bit immediate.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_imm_gen (
@@ -279,7 +279,7 @@ endmodule//=====================================================================
 //   Designed to be compatible with future fully pipelined operation.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_decode(
@@ -319,7 +319,7 @@ module mrv32_decode(
     assign rs2_addr = instr[24:20];
     assign funct7   = instr[31:25];
     assign funct3_upper = funct3[2:1];
-    assign funct3_lower = funct3[0];
+    assign funct3_lower = funct3[0] ~^ funct3[2];
 
   always_comb begin
 
@@ -450,13 +450,13 @@ module mrv32_decode(
         OPCODE_BTYPE: begin // B-TYPE (BRANCHES)
             alusrc = 1'b0;
             imm_sel = IMM_B;
-            br_sel = (funct3_lower) ? BR_NQLT : BR_EQLT; // BNE/BEQ, BLT/BGE, BLTU/BGEU
+            br_sel = (funct3_lower) ? BR_EQLT : BR_NQLT; // BNE/BEQ, BLT/BGE, BLTU/BGEU
             case(funct3_upper)
             2'b00: aluop = ALU_SUB;  // BEQ  (000) or BNE  (001)
             2'b10: aluop = ALU_SLT;  // BLT  (100) or BGE  (101)
             2'b11: aluop = ALU_SLTU; // BLTU (110) or BGEU (111)
             default: begin
-                unsupported_instr = 1'b0;
+                unsupported_instr = 1'b1;
             end
             endcase
         end
@@ -505,7 +505,7 @@ endmodule//=====================================================================
 //   Designed to support forwarding in future revisions.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_regfile (
@@ -559,7 +559,7 @@ endmodule//=====================================================================
 //   generation.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_alu (
@@ -610,7 +610,7 @@ endmodule//=====================================================================
 //   This unit stalls the entire core during memory transactions.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_lsu (
@@ -808,51 +808,6 @@ module mrv32_lsu (
   end
 
 endmodule//==============================================================================
-// Module: mrv32_bru v1.0
-//------------------------------------------------------------------------------
-// Description:
-//   Branch resolution unit.
-//
-// Function:
-//   - Evaluates branch conditions using ALU result flags
-//   - Generates take_branch signal
-//
-// Supported Branches:
-//   - BEQ, BNE
-//   - BLT, BGE
-//   - BLTU, BGEU
-//
-//   - JAL, JALR (Unconditional Branches)
-//
-// Notes:
-//   Branch resolution currently occurs in MEM stage.
-//
-// Author: Martim Bento
-// Date  : 28/02/2026
-//==============================================================================
-
-module mrv32_bru (
-
-    input logic [1:0] br_sel,
-    input logic [31:0] alu_result,
-    output logic take_branch
-
-);
-
-    logic is_Zero;
-    assign is_Zero = alu_result == 32'd0;
-
-    always_comb begin
-        case (br_sel)
-            2'b00: take_branch = 1'b0; // not a branch
-            2'b01: take_branch = 1'b1; // unconditional jump (JAL/JALR)
-            2'b10: take_branch = is_Zero ? 1'b1 : 1'b0; // branch (BEQ, BLT, BLTU)
-            2'b11: take_branch = is_Zero ? 1'b0 : 1'b1; // branch (BNE, BGE, BGEU)
-            default: take_branch = 1'b0;
-        endcase
-    end
-
-endmodule//==============================================================================
 // Module: mrv32_wb v1.0
 //------------------------------------------------------------------------------
 // Description:
@@ -870,7 +825,7 @@ endmodule//=====================================================================
 //   Designed to support future pipelined execution.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_wb (
@@ -960,7 +915,7 @@ endmodule//=====================================================================
 //   - Add pipeline flush on branch
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 import mrv32_pkg::*;

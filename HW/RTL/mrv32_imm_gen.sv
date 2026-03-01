@@ -16,7 +16,7 @@
 //   Outputs properly sign-extended 32-bit immediate.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_imm_gen (

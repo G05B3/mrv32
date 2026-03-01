@@ -20,7 +20,7 @@
 //   Designed to be compatible with future fully pipelined operation.
 //
 // Author: Martim Bento
-// Date  : 28/02/2026
+// Date  : 01/03/2026
 //==============================================================================
 
 module mrv32_decode(
@@ -60,7 +60,7 @@ module mrv32_decode(
     assign rs2_addr = instr[24:20];
     assign funct7   = instr[31:25];
     assign funct3_upper = funct3[2:1];
-    assign funct3_lower = funct3[0];
+    assign funct3_lower = funct3[0] ~^ funct3[2];
 
   always_comb begin
 
@@ -191,13 +191,13 @@ module mrv32_decode(
         OPCODE_BTYPE: begin // B-TYPE (BRANCHES)
             alusrc = 1'b0;
             imm_sel = IMM_B;
-            br_sel = (funct3_lower) ? BR_NQLT : BR_EQLT; // BNE/BEQ, BLT/BGE, BLTU/BGEU
+            br_sel = (funct3_lower) ? BR_EQLT : BR_NQLT; // BNE/BEQ, BLT/BGE, BLTU/BGEU
             case(funct3_upper)
             2'b00: aluop = ALU_SUB;  // BEQ  (000) or BNE  (001)
             2'b10: aluop = ALU_SLT;  // BLT  (100) or BGE  (101)
             2'b11: aluop = ALU_SLTU; // BLTU (110) or BGEU (111)
             default: begin
-                unsupported_instr = 1'b0;
+                unsupported_instr = 1'b1;
             end
             endcase
         end

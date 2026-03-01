@@ -1,6 +1,75 @@
 # MRV32
-A very minimal RISC-V 32b CPU design equipped with a simple memory systems and memory mapped peripherals. Includes an Instruction Set Simulator, to simulate and compare the code execution.
 
-More concretely, it is a CPU design project focused on building a minimal RV32I-based processor from the ground up using open-source tools. The project spans the full development flow, starting from a custom instruction-set simulator (ISS) and progressing through SystemVerilog RTL implementation, verification, synthesis, and ASIC-style place-and-route.
+MRV32 is a minimal RV32I-based RISC-V processor project built from the ground up using open-source tools.  
+The project explores the complete hardware development flow, from architectural modeling to RTL implementation and physical design.
 
-The processor is intentionally simple and in-order, with a small on-chip memory system and memory-mapped peripherals, and is developed alongside a reference simulator to enable differential testing and early validation. The primary goal of MRV32 is learning and exploration of computer architecture and hardware design, rather than performance or full ISA compliance.
+---
+
+## Project Overview
+
+MRV32 currently consists of two primary components:
+
+1. **Instruction Set Simulator (ISS)**  
+   A functional reference model of the RV32I ISA used for architectural validation and differential testing.
+
+2. **SystemVerilog RTL Implementation**  
+   A synthesizable hardware implementation of the processor, developed incrementally from a serialized bring-up core toward a fully pipelined design.
+
+---
+
+## Current Status
+
+### Instruction Set Simulator (ISS)
+- RV32I functional simulator (excluding FENCE, ECALL, EBREAK, CSRs)
+- Used as architectural golden reference
+- Supports memory mapped IOs, with a custom printf implementation
+
+### RTL v1.0 – Serialized Core
+- Single instruction in flight
+- Structured IF/ID/EX/MEM/WB stage registers
+- Branch resolution in MEM stage
+
+This version behaves like a multi-cycle processor while maintaining a pipelined structure to enable future upgrades.
+
+---
+
+## Roadmap
+
+### Version 2.0
+- True 5-stage pipelined core
+- Hazard detection unit
+- Forwarding paths
+- Pipeline flush on branch
+- Memory hierarchy (Caches)
+- Improved IPC
+
+---
+
+## Long-Term Goals
+- Memory hierarchy refinement
+- Memory mapped IO expansion
+- Accelerator system integration (CGRA)
+- Synthesis and ASIC-style place-and-route for a complete chip
+
+---
+
+## Toolchain
+
+- SystemVerilog RTL
+- Open-source simulation tools (iverilog, yosys, openROAD)
+- Custom ISS for differential testing
+- ASIC-oriented synthesis and PnR flow
+
+---
+
+## Purpose
+
+MRV32 is primarily a learning and exploration project in:
+
+- Computer Architecture
+- Microarchitecture design
+- RTL development
+- Verification methodology
+- Hardware implementation flow
+
+Performance is secondary to architectural clarity and design discipline.
