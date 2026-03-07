@@ -6,7 +6,36 @@ module core_tb;
   // Parameters
   // -------------------------
   localparam integer RD_LATENCY = 2;
-  localparam integer MAX_CYCLES = 10000;
+
+  // -------------------------
+  // Runtime arguments
+  // -------------------------
+  integer      MAX_INSTRS;
+  logic [31:0] dump_start;
+  integer      dump_len;
+  bit          trace_retire;
+
+  initial begin
+    MAX_INSTRS   = 10000;
+    dump_start   = 32'h00000000;
+    dump_len     = 64;
+    trace_retire = 0;
+
+    begin
+      integer tmp;
+      string  stmp;
+
+      if ($value$plusargs("MAX_INSTRS=%d", tmp)) MAX_INSTRS   = tmp;
+      if ($value$plusargs("DUMP_LEN=%d",   tmp)) dump_len     = tmp;
+      if ($value$plusargs("TRACE=%d",      tmp)) trace_retire = tmp[0];
+      if ($value$plusargs("DUMP_START=%s", stmp)) dump_start  = stmp.atohex();
+    end
+
+    $display("MAX_INSTRS  = %0d",    MAX_INSTRS);
+    $display("DUMP_START  = 0x%08x", dump_start);
+    $display("DUMP_LEN    = %0d",    dump_len);
+    $display("TRACE       = %0b",    trace_retire);
+  end
 
   // -------------------------
   // Clock / Reset
@@ -28,20 +57,7 @@ module core_tb;
     if (!rst_n) cycle <= 0;
     else        cycle <= cycle + 1;
 
-  // -------------------------
-  // Retirement Trace Control
-  // -------------------------
-  bit trace_retire;
-
-  initial begin
-    trace_retire = 0; // Change this depending on whether to trace or not
-    if (trace_retire) begin
-      $display("Retirement trace ENABLED");
-    end
-    else begin
-      $display("Retirement trace DISABLED");
-    end
-  end
+  int retired_instrs = 0;
 
   // -------------------------
   // Retirement Trace
@@ -49,24 +65,25 @@ module core_tb;
   always @(posedge clk) begin
     if (rst_n && trace_retire && core.instr_valid_wb) begin
       $display("[CYCLE %0d] RETIRE | PC=0x%08h | NEXT_PC=0x%08h",
-               cycle,
-               core.pc_wb,
-               core.pc_next);
+               cycle, core.pc_wb, core.pc_next);
     end
     if (rst_n && trace_retire && core.instr_valid_mem) begin
-        $display("[CYCLE %0d] MEM | stall=%b, lsu_done=%b, waddr=%h, ld=%h",cycle,core.stall, core.lsu_done, core.b_addr, core.lsu.load_data);
+      $display("[CYCLE %0d] MEM | stall=%b, lsu_done=%b, waddr=%h, ld=%h",
+               cycle, core.stall, core.lsu_done, core.b_addr, core.lsu.load_data);
     end
     if (rst_n && trace_retire) begin
-      $display("[cycle %0d] aluop=%d, rs1_addr=%h, rs1_val=%h, rs2_addr=%H, rs2_val=%h, branch taken=%b, br_sel=%h, br_sel_mem=%h, z=%h",cycle,
-      core.aluop_ex, core.rs1_addr, core.rs1_data, core.rs2_addr, core.rs2_data, core.take_branch, core.br_sel_ex, core.br_sel_mem, core.mrv_bru.is_Zero);
+      $display("[cycle %0d] aluop=%d, rs1_addr=%h, rs1_val=%h, rs2_addr=%h, rs2_val=%h, branch taken=%b, br_sel=%h, br_sel_mem=%h, z=%h",
+               cycle, core.aluop_ex, core.rs1_addr, core.rs1_data,
+               core.rs2_addr, core.rs2_data, core.take_branch,
+               core.br_sel_ex, core.br_sel_mem, core.mrv_bru.is_Zero);
     end
+    if (rst_n && core.instr_accept)
+      retired_instrs = retired_instrs + 1;
   end
 
   // -------------------------
   // Core <-> Memory Wires
   // -------------------------
-
-  // Port A (Instruction)
   logic                  a_valid;
   logic [ADDR_WIDTH-1:0] a_addr;
   logic [31:0]           a_wdata;
@@ -74,7 +91,6 @@ module core_tb;
   logic [31:0]           a_rdata;
   logic                  a_rvalid;
 
-  // Port B (Data)
   logic                  b_valid;
   logic [ADDR_WIDTH-1:0] b_addr;
   logic [31:0]           b_wdata;
@@ -82,7 +98,15 @@ module core_tb;
   logic [31:0]           b_rdata;
   logic                  b_rvalid;
 
-  logic unsupported_instr;
+  logic                  illegal_instr;
+
+  // -------------------------
+  // Peripheral Wires
+  // -------------------------
+  logic        periph_valid;
+  logic [31:0] periph_addr;
+  logic [31:0] periph_wdata;
+  logic        tohost_fired;
 
   // -------------------------
   // Instantiate Core
@@ -91,21 +115,19 @@ module core_tb;
     .clk(clk),
     .rst_n(rst_n),
 
-    .a_valid(a_valid),
-    .a_addr(a_addr),
-    .a_wdata(a_wdata),
-    .a_wstrb(a_wstrb),
-    .a_rdata(a_rdata),
-    .a_rvalid(a_rvalid),
+    .a_valid(a_valid),  .a_addr(a_addr),
+    .a_wdata(a_wdata),  .a_wstrb(a_wstrb),
+    .a_rdata(a_rdata),  .a_rvalid(a_rvalid),
 
-    .b_valid(b_valid),
-    .b_addr(b_addr),
-    .b_wdata(b_wdata),
-    .b_wstrb(b_wstrb),
-    .b_rdata(b_rdata),
-    .b_rvalid(b_rvalid),
+    .b_valid(b_valid),  .b_addr(b_addr),
+    .b_wdata(b_wdata),  .b_wstrb(b_wstrb),
+    .b_rdata(b_rdata),  .b_rvalid(b_rvalid),
 
-    .unsupported_instr(unsupported_instr)
+    .periph_valid(periph_valid),
+    .periph_addr (periph_addr),
+    .periph_wdata(periph_wdata),
+
+    .illegal_instr(illegal_instr)
   );
 
   // -------------------------
@@ -118,19 +140,24 @@ module core_tb;
   ) mem (
     .clk(clk),
 
-    .a_valid(a_valid),
-    .a_addr(a_addr),
-    .a_wdata(a_wdata),
-    .a_wstrb(a_wstrb),
-    .a_rdata(a_rdata),
-    .a_rvalid(a_rvalid),
+    .a_valid(a_valid),  .a_addr(a_addr),
+    .a_wdata(a_wdata),  .a_wstrb(a_wstrb),
+    .a_rdata(a_rdata),  .a_rvalid(a_rvalid),
 
-    .b_valid(b_valid),
-    .b_addr(b_addr),
-    .b_wdata(b_wdata),
-    .b_wstrb(b_wstrb),
-    .b_rdata(b_rdata),
-    .b_rvalid(b_rvalid)
+    .b_valid(b_valid),  .b_addr(b_addr),
+    .b_wdata(b_wdata),  .b_wstrb(b_wstrb),
+    .b_rdata(b_rdata),  .b_rvalid(b_rvalid)
+  );
+
+  // -------------------------
+  // Instantiate Sim Peripherals
+  // -------------------------
+  sim_peripherals periph (
+    .clk         (clk),
+    .periph_valid(periph_valid),
+    .periph_addr (periph_addr),
+    .periph_wdata(periph_wdata),
+    .tohost_fired(tohost_fired)
   );
 
   // -------------------------
@@ -140,7 +167,6 @@ module core_tb;
     string prog;
     prog = "program.hex";
     void'($value$plusargs("PROG=%s", prog));
-
     $display("Loading program: %s", prog);
     $readmemh(prog, mem.mem);
   end
@@ -151,15 +177,24 @@ module core_tb;
   initial begin
     wait(rst_n);
 
-    while (cycle < MAX_CYCLES && !unsupported_instr)
+    while (retired_instrs < MAX_INSTRS && !illegal_instr && !tohost_fired)
       @(posedge clk);
 
     $display("\n=======================================");
-    $display("Simulation finished at cycle %0d", cycle);
+    if (tohost_fired) begin
+      $display("Simulation ended: TOHOST signal");
+    end
+    else if (illegal_instr)
+      $display("Simulation ended: illegal instruction");
+    else
+      $display("Simulation ended: MAX_INSTRS reached (%0d)", MAX_INSTRS);
+    $display("Cycles:   %0d", cycle);
+    $display("Retired:  %0d", retired_instrs);
+    $display("CPI:      %.2f", real'(cycle) / real'(retired_instrs));
     $display("=======================================\n");
 
     dump_registers();
-    dump_memory(32'h000fff00, 264);
+    dump_memory(dump_start, dump_len);
 
     $finish;
   end
@@ -172,16 +207,11 @@ module core_tb;
     reg [31:0] val;
   begin
     $display("------ REGISTER FILE ------");
-
     for (i = 0; i < 32; i++) begin
-      if (i == 0)
-        val = 32'd0;
-      else
-        val = core.mrv_rf.registers[i-1];
-
+      if (i == 0) val = 32'd0;
+      else        val = core.mrv_rf.registers[i-1];
       $display("x%0d = 0x%08x", i, val);
     end
-
     $display("---------------------------\n");
   end
   endtask
@@ -191,31 +221,18 @@ module core_tb;
   // -------------------------
   task dump_memory;
     input [31:0] start_addr;
-    input [31:0] length;
+    input integer length;
     integer a;
     reg [31:0] w;
     reg [7:0] b0, b1, b2, b3;
   begin
-    $display("------ MEMORY DUMP ------");
-
+    $display("------ MEMORY DUMP (0x%08x, %0d bytes) ------", start_addr, length);
     for (a = start_addr; a < start_addr + length; a = a + 4) begin
-      w = {
-        mem.mem[a+3],
-        mem.mem[a+2],
-        mem.mem[a+1],
-        mem.mem[a+0]
-      };
-
-      b0 = w[7:0];
-      b1 = w[15:8];
-      b2 = w[23:16];
-      b3 = w[31:24];
-
-      $display("0x%08x : %02x %02x %02x %02x  (0x%08x)",
-               a, b0, b1, b2, b3, w);
+      w = { mem.mem[a+3], mem.mem[a+2], mem.mem[a+1], mem.mem[a+0] };
+      b0 = w[7:0]; b1 = w[15:8]; b2 = w[23:16]; b3 = w[31:24];
+      $display("0x%08x : %02x %02x %02x %02x  (0x%08x)", a, b0, b1, b2, b3, w);
     end
-
-    $display("--------------------------\n");
+    $display("--------------------------------------------\n");
   end
   endtask
 

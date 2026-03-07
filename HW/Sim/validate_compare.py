@@ -1,41 +1,92 @@
 #!/usr/bin/env python3
+"""
+validate.py — Compare ISS vs RTL simulation output.
+
+Usage:
+    python3 validate.py -f <source.c/.s> [options]
+
+Options:
+    -f <file>       Source file (.c or .s)
+    -n <num>        Max instructions to retire (default: 1000)
+    -s <hex_addr>   Memory dump start address (default: 0x00000000)
+    -l <num>        Memory dump length in bytes (default: 64)
+    -c <version>    Select specific core version
+    -t              Enable RTL retirement trace
+    -h              Show help
+"""
+
 import subprocess
+import argparse
 import re
 import sys
 import os
 
-# ------------------------------------------------------------
-# Configuration
-# ------------------------------------------------------------
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
-HW_SIM       = os.path.join(PROJECT_ROOT, "HW", "Sim")
-ISS_DIR      = os.path.join(PROJECT_ROOT, "SW", "ISS")
-SW_DIR       = os.path.join(PROJECT_ROOT, "SW")
+# ---------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------
+ROOT     = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+HW_SIM   = os.path.join(ROOT, "HW", "Sim")
+HW_RTL   = os.path.join(ROOT, "HW", "RTL")
+SW_DIR   = os.path.join(ROOT, "SW")
+ISS_DIR  = os.path.join(ROOT, "SW", "ISS")
+LINK_DIR = os.path.join(SW_DIR, "Link")
+ISS_BIN  = os.path.join(ISS_DIR, "mrv_iss")
 
-if len(sys.argv) < 2:
-    print("Usage: python3 validate.py <source_program.c/.s>")
-    sys.exit(1)
+PROG_ELF = os.path.join(HW_SIM, "validation.elf")
+PROG_HEX = os.path.join(HW_SIM, "validation.hex")
 
-SRC      = sys.argv[1]
-PROG_ELF = "validation.elf"
-PROG_HEX = "validation.hex"
+CORE_FILES = [
+    "mrv32_pkg.sv",
+    "mrv32_alu.sv",
+    "mrv32_fetch.sv",
+    "mrv32_id.sv",
+    "mrv32_rf.sv",
+    "mrv32_imm_gen.sv",
+    "mrv32_lsu.sv",
+    "mrv32_bru.sv",
+    "mrv32_wb.sv",
+    "mrv32_core.sv",
+    "mrv32_periph.sv",
+]
 
-MEM_START  = 0x000fff00
-MEM_END    = 0x00100000
-MAX_RETIRE = 1000
+INFRA_SOURCES = [
+    "../RTL/mem_dual_port.sv",
+    "../RTL/peripherals.sv",
+    "core_tb.sv",
+]
 
-# ------------------------------------------------------------
-# Helper functions
-# ------------------------------------------------------------
-def run(cmd, cwd=None):
-    """Run a shell command and return stdout. Exit on error."""
+# ---------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------
+def run(cmd, cwd=None, desc=None):
+    if desc:
+        print(f"  {desc}...")
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd)
     if result.returncode != 0:
-        print("Command failed:\n", result.stderr)
-        sys.exit(1)
+        print(f"\nFailed: {' '.join(cmd)}")
+        print(result.stderr)
+        sys.exit(0)
     return result.stdout
 
-def parse_regs(text):
+def banner(title):
+    print(f"\n{'='*50}")
+    print(f"  {title}")
+    print(f"{'='*50}")
+
+# ---------------------------------------------------------------
+# Parsers
+# ---------------------------------------------------------------
+def parse_iss_regs(text):
+    """Parse RF(all) section from ISS output."""
+    regs = {}
+    for line in text.splitlines():
+        # Each line has up to 8 registers: x0=0x... x1=0x... etc
+        for m in re.finditer(r"x(\d+)=0x([0-9a-fA-F]+)", line):
+            regs[int(m.group(1))] = int(m.group(2), 16)
+    return regs
+
+def parse_rtl_regs(text):
+    """Parse register dump from RTL output."""
     regs = {}
     for line in text.splitlines():
         m = re.match(r"x(\d+)\s*=\s*0x([0-9a-fA-F]+)", line)
@@ -43,186 +94,212 @@ def parse_regs(text):
             regs[int(m.group(1))] = int(m.group(2), 16)
     return regs
 
-def parse_mem(text):
+def parse_iss_mem(text):
+    """Parse MEM(All) section from ISS output."""
     mem = {}
     for line in text.splitlines():
-        m = re.match(r"0x([0-9a-fA-F]+)\s*:\s*.*\(0x([0-9a-fA-F]+)\)", line)
+        m = re.match(r"0x([0-9a-fA-F]+):\s*0x([0-9a-fA-F]+)", line)
         if m:
-            addr = int(m.group(1), 16)
-            val  = int(m.group(2), 16)
-            mem[addr] = val
+            mem[int(m.group(1), 16)] = int(m.group(2), 16)
     return mem
 
-def parse_retire(text):
-    m = re.search(r"FINAL_RETIRE_COUNT=(\d+)", text)
-    if m:
-        return int(m.group(1))
-    return None
+def parse_rtl_mem(text):
+    """Parse memory dump from RTL output."""
+    mem = {}
+    for line in text.splitlines():
+        m = re.match(r"0x([0-9a-fA-F]+)\s*:.*\(0x([0-9a-fA-F]+)\)", line)
+        if m:
+            mem[int(m.group(1), 16)] = int(m.group(2), 16)
+    return mem
 
-# ------------------------------------------------------------
-# Step 0: Compile C/ASM → ELF
-# ------------------------------------------------------------
-print(f"Compiling {SRC} → {PROG_ELF}...")
+def parse_iss_instret(text):
+    m = re.search(r"instret:\s*(\d+)", text)
+    return int(m.group(1)) if m else None
 
-if SRC.endswith(".c"):
-    # Run the exact command you would type in terminal for C
-    compile_cmd = [
-        "riscv64-unknown-elf-gcc",
-        "-march=rv32i", "-mabi=ilp32",
-        "-ffreestanding", "-nostdlib", "-nostartfiles",
-        "-I" + os.path.join(ISS_DIR, "Include"),
-        "-I" + os.path.join(PROJECT_ROOT, "include"),
-        "-I" + os.path.join(ISS_DIR, "/../Lib"),
-        "-T" + os.path.join(SW_DIR, "Link", "link.ld"),
-        "-Wl,-L" + os.path.join(SW_DIR, "Link"),
-        "-Wl,-I" + os.path.join(SW_DIR, "Link"),
-        os.path.join(SW_DIR, "Link", "crt0.s"),
-        SRC,
-        "-o", PROG_ELF,
-        "-lgcc"
-    ]
-elif SRC.endswith(".s"):
-    src_path = os.path.abspath(SRC)
-    crt0_path = os.path.join(SW_DIR, "Link", "crt0.s")
-    link_ld   = os.path.join(SW_DIR, "Link", "link.ld")
-    elf_path  = os.path.join(HW_SIM, PROG_ELF)
-    asm_obj   = "asm_obj.o"
+def parse_rtl_instret(text):
+    m = re.search(r"Retired:\s*(\d+)", text)
+    return int(m.group(1)) if m else None
 
-    # Step 1: Assemble .s → .o
-    run([
-        "riscv64-unknown-elf-as",
-        "-march=rv32i",
-        "-mabi=ilp32",
-        src_path,
-        "-o", asm_obj
-    ], cwd=HW_SIM)
+# ---------------------------------------------------------------
+# Build steps
+# ---------------------------------------------------------------
+def compile_source(src):
+    banner("Step 1: Compile")
+    ext = os.path.splitext(src)[1]
+    if ext == ".c":
+        run([
+            "riscv64-unknown-elf-gcc",
+            "-march=rv32i", "-mabi=ilp32",
+            "-ffreestanding", "-nostdlib", "-nostartfiles",
+            f"-I{ISS_DIR}/Include",
+            f"-I{ROOT}/include",
+            f"-T{LINK_DIR}/link.ld",
+            f"-I{SW_DIR}/Lib",
+            f"-Wl,-L{LINK_DIR}",
+            f"{LINK_DIR}/crt0.s",
+            os.path.abspath(src),
+            "-o", PROG_ELF,
+            "-lgcc"
+        ], cwd=HW_SIM, desc=f"Compiling {src} → validation.elf")
 
-    # Step 2: Link using GCC (not ld) so it finds crt0, libgcc, and linker paths
-    compile_cmd = [
-        "riscv64-unknown-elf-gcc",
-        "-march=rv32i", "-mabi=ilp32",
-        "-ffreestanding", "-nostdlib", "-nostartfiles",
-        "-T", os.path.join(SW_DIR, "Link", "link.ld"),
-        os.path.join(SW_DIR, "Link", "crt0.s"),
-        asm_obj,  # absolute path
-        "-o", os.path.join(HW_SIM, PROG_ELF),
-        "-lgcc"
-    ]
-    run(compile_cmd, cwd=SW_DIR)
-else:
-    raise ValueError("Unsupported source file type")
+    elif ext == ".s":
+        obj = os.path.join(HW_SIM, "asm_obj.o")
+        run([
+            "riscv64-unknown-elf-as",
+            "-march=rv32i", "-mabi=ilp32",
+            os.path.abspath(src), "-o", obj
+        ], cwd=HW_SIM, desc=f"Assembling {src} → asm_obj.o")
+        run([
+            "riscv64-unknown-elf-gcc",
+            "-march=rv32i", "-mabi=ilp32",
+            "-ffreestanding", "-nostdlib", "-nostartfiles",
+            f"-T{LINK_DIR}/link.ld",
+            f"{LINK_DIR}/crt0.s",
+            obj, "-o", PROG_ELF, "-lgcc"
+        ], cwd=HW_SIM, desc="Linking → validation.elf")
+    else:
+        print(f"Unsupported source type: {ext}")
+        sys.exit(0)
 
-run(compile_cmd, cwd=HW_SIM)
+def elf_to_hex():
+    run(["./getProgMem.sh", PROG_ELF, "-o", PROG_HEX],
+        cwd=HW_SIM, desc="Converting ELF → HEX")
 
-# ------------------------------------------------------------
-# Step 1: Convert ELF → HEX for RTL
-# ------------------------------------------------------------
-print(f"Converting {PROG_ELF} → {PROG_HEX}...")
-run(["./getProgMem.sh", PROG_ELF, "-o", PROG_HEX], cwd=HW_SIM)
+def run_iss(max_instrs, mem_start, mem_end):
+    banner("Step 2: ISS")
+    out = run([
+        ISS_BIN,
+        PROG_ELF,
+        "--show-register-file=all",
+        "--show-memory=all",
+        f"--mem-addr-base=0x{mem_start:08x}",
+        f"--mem-addr-end=0x{mem_end:08x}",
+        f"--max-steps={max_instrs}",
+        f"--trace",
+    ], cwd=HW_SIM, desc=f"Running ISS ({max_instrs} instrs)")
+    return out
 
-# ------------------------------------------------------------
-# Step 2: Run ISS
-# ------------------------------------------------------------
-print("Running ISS...")
-iss_path = os.path.join(ISS_DIR, "mrv_iss")
-elf_path = os.path.join(HW_SIM, PROG_ELF)  # absolute path to ELF
+def compile_rtl(core_version=None):
+    banner("Step 3: Compile RTL")
 
-iss_cmd = [
-    iss_path,
-    elf_path,
-    "--show-register-file=all",
-    "--show-memory=all",
-    f"--mem-addr-base=0x{MEM_START:08x}",
-    f"--mem-addr-end=0x{MEM_END:08x}",
-    f"--max-steps={MAX_RETIRE}",
-]
+    if core_version is None:
+        core_dir = "../RTL"
+    else:
+        core_dir = f"../RTL/core_{core_version}"
+        if not os.path.isdir(os.path.join(HW_SIM, core_dir)):
+            print(f"\nError: core version '{core_version}' not found at {core_dir}")
+            available = [
+                d.replace("core_", "")
+                for d in os.listdir(os.path.join(HW_SIM, "../RTL"))
+                if d.startswith("core_")
+            ]
+            if available:
+                print(f"Available versions: {', '.join(sorted(available))}")
+            sys.exit(1)
 
-iss_out = run(iss_cmd, cwd=HW_SIM)  # run from the directory containing the ELF
+    core_srcs = [f"{core_dir}/{f}" for f in CORE_FILES]
+    all_srcs  = core_srcs + INFRA_SOURCES
 
-# ------------------------------------------------------------
-# Step 3: Compile RTL
-# ------------------------------------------------------------
-print("Compiling RTL...")
-rtl_compile_cmd = [
-    "iverilog", "-g2012", "-o", "sim",
-    "../RTL/mrv32_pkg.sv",
-    "../RTL/mrv32_alu.sv",
-    "../RTL/mrv32_fetch.sv",
-    "../RTL/mrv32_id.sv",
-    "../RTL/mrv32_rf.sv",
-    "../RTL/mrv32_imm_gen.sv",
-    "../RTL/mrv32_lsu.sv",
-    "../RTL/mrv32_bru.sv",
-    "../RTL/mrv32_wb.sv",
-    "../RTL/mrv32_core.sv",
-    "../RTL/mem_dual_port.sv",
-    "validate.sv"
-]
-run(rtl_compile_cmd, cwd=HW_SIM)
+    print(f"  Core directory: {core_dir}")
+    run(["iverilog", "-g2012", "-o", "sim"] + all_srcs,
+        cwd=HW_SIM, desc="Compiling RTL")
 
-# ------------------------------------------------------------
-# Step 4: Run RTL
-# ------------------------------------------------------------
-print("Running RTL...")
-rtl_run_cmd = [
-    "vvp", "sim",
-    f"+PROG={PROG_HEX}",
-    f"+MAX_RETIRE={MAX_RETIRE}",
-    f"+MEM_START={MEM_START:08x}",
-    f"+MEM_END={MEM_END:08x}"
-]
-rtl_out = run(rtl_run_cmd, cwd=HW_SIM)
+def run_rtl(max_instrs, mem_start, mem_len, trace):
+    banner("Step 4: RTL Simulation")
+    out = run([
+        "vvp", "sim",
+        f"+PROG={PROG_HEX}",
+        f"+MAX_INSTRS={max_instrs}",
+        f"+DUMP_START={mem_start:08x}",
+        f"+DUMP_LEN={mem_len}",
+        f"+TRACE={int(trace)}",
+    ], cwd=HW_SIM, desc=f"Running RTL ({max_instrs} instrs)")
+    return out
 
-# ------------------------------------------------------------
-# Step 5: Parse outputs
-# ------------------------------------------------------------
-iss_regs   = parse_regs(iss_out)
-rtl_regs   = parse_regs(rtl_out)
-iss_mem    = parse_mem(iss_out)
-rtl_mem    = parse_mem(rtl_out)
-iss_retire = MAX_RETIRE  # ISS always uses max-steps
-rtl_retire = parse_retire(rtl_out)
+# ---------------------------------------------------------------
+# Comparison
+# ---------------------------------------------------------------
+def compare(iss_out, rtl_out):
+    banner("Step 5: Comparison")
 
-# ------------------------------------------------------------
-# Step 6: Compare
-# ------------------------------------------------------------
-error = False
+    iss_regs   = parse_iss_regs(iss_out)
+    rtl_regs   = parse_rtl_regs(rtl_out)
+    iss_mem    = parse_iss_mem(iss_out)
+    rtl_mem    = parse_rtl_mem(rtl_out)
+    iss_retire = parse_iss_instret(iss_out)
+    rtl_retire = parse_rtl_instret(rtl_out)
 
-print("\n===== RETIRE COUNT =====")
-print(f"ISS: {iss_retire}")
-print(f"RTL: {rtl_retire}")
-if iss_retire != rtl_retire:
-    print("Retire mismatch")
-    error = True
-else:
-    print("Retire match")
+    errors = []
 
-print("\n===== REGISTERS =====")
-for i in range(32):
-    iv = iss_regs.get(i, 0)
-    rv = rtl_regs.get(i, 0)
-    if iv != rv:
-        print(f"MISMATCH: x{i:02d}: ISS=0x{iv:08x} RTL=0x{rv:08x}")
-        error = True
+    # instret
+    print(f"\n  instret — ISS: {iss_retire}  RTL: {rtl_retire}", end="  ")
+    if iss_retire != rtl_retire:
+        print("✗ MISMATCH")
+        errors.append(f"instret: ISS={iss_retire} RTL={rtl_retire}")
+    else:
+        print("✓")
 
-if not error:
-    print("Registers match")
+    # registers
+    print("\n  Registers:")
+    reg_ok = True
+    for i in range(32):
+        iv = iss_regs.get(i, 0)
+        rv = rtl_regs.get(i, 0)
+        if iv != rv:
+            print(f"    x{i:02d}  ISS=0x{iv:08x}  RTL=0x{rv:08x}  ✗")
+            errors.append(f"x{i}: ISS=0x{iv:08x} RTL=0x{rv:08x}")
+            reg_ok = False
+    if reg_ok:
+        print("    all match ✓")
 
-print("\n===== MEMORY =====")
-for addr in sorted(iss_mem.keys()):
-    iv = iss_mem.get(addr, 0)
-    rv = rtl_mem.get(addr, 0)
-    if iv != rv:
-        print(f"MISMATCH: MEM[0x{addr:08x}]: ISS=0x{iv:08x} RTL=0x{rv:08x}")
-        error = True
+    # memory
+    print("\n  Memory:")
+    mem_ok = True
+    all_addrs = sorted(set(iss_mem) | set(rtl_mem))
+    for addr in all_addrs:
+        iv = iss_mem.get(addr, 0)
+        rv = rtl_mem.get(addr, 0)
+        if iv != rv:
+            print(f"    0x{addr:08x}  ISS=0x{iv:08x}  RTL=0x{rv:08x}  ✗")
+            errors.append(f"mem[0x{addr:08x}]: ISS=0x{iv:08x} RTL=0x{rv:08x}")
+            mem_ok = False
+    if mem_ok:
+        print("    all match ✓")
 
-if not error:
-    print("Memory match")
+    # verdict
+    banner("Result")
+    if errors:
+        print(f"  FAILED — {len(errors)} mismatch(es)\n")
+        sys.exit(0)
+    else:
+        print("  PASSED ✓\n")
+        sys.exit(0)
 
-print("\n=================================")
-if error:
-    print("VALIDATION FAILED")
-    sys.exit(1)
-else:
-    print("VALIDATION PASSED")
-    sys.exit(0)
+# ---------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        description="Validate RTL against ISS",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    parser.add_argument("-f", metavar="FILE",    required=True,              help="Source file (.c or .s)")
+    parser.add_argument("-n", metavar="NUM",     type=int, default=1000,     help="Max instructions (default: 1000)")
+    parser.add_argument("-s", metavar="ADDR",    default="0x00000000",       help="Memory dump start, hex (default: 0x00000000)")
+    parser.add_argument("-l", metavar="BYTES",   type=int, default=64,       help="Memory dump length in bytes (default: 64)")
+    parser.add_argument("-c", metavar="VERSION", default=None,               help="Core version, e.g. v1.0 (default: working copy)")
+    parser.add_argument("-t", action="store_true", default=False,            help="Enable RTL trace")
+    args = parser.parse_args()
+
+    mem_start = int(args.s, 16)
+    mem_end   = mem_start + args.l
+
+    compile_source(args.f)
+    elf_to_hex()
+    iss_out = run_iss(args.n, mem_start, mem_end)
+    compile_rtl(args.c)
+    rtl_out = run_rtl(args.n, mem_start, args.l, args.t)
+    compare(iss_out, rtl_out)
+
+if __name__ == "__main__":
+    main()

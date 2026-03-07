@@ -6,7 +6,7 @@ module core_tb;
   // Parameters
   // -------------------------
   localparam integer RD_LATENCY = 2;
-  localparam integer MAX_CYCLES = 500;
+  localparam integer MAX_CYCLES = 5000;
 
   integer retire_count;
   integer max_retire;
@@ -137,7 +137,7 @@ module core_tb;
     .b_rdata(b_rdata),
     .b_rvalid(b_rvalid),
 
-    .unsupported_instr(unsupported_instr)
+    .illegal_instr(unsupported_instr)
   );
 
   // -------------------------

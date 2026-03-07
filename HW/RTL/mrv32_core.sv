@@ -26,7 +26,10 @@
 
 import mrv32_pkg::*;
 
-module mrv32_core (
+module mrv32_core #(
+    parameter logic [31:0] PERIPH_BASE = 32'h10000000,
+    parameter logic [31:0] PERIPH_END = 32'h10001000
+) (
     input logic clk,
     input logic rst_n,
 
@@ -43,8 +46,13 @@ module mrv32_core (
     output logic [3:0]            b_wstrb,
     input  logic [31:0]           b_rdata,
     input  logic                  b_rvalid,
+
+    // Peripherals
+    output logic periph_valid,
+    output logic [31:0] periph_addr,
+    output logic [31:0] periph_wdata,
     
-    output logic unsupported_instr
+    output logic illegal_instr
 );
 
 logic [31:0] instr_if, instr;
@@ -97,7 +105,7 @@ mrv32_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd
 
 assign instr_valid_decode = iv_if_id & ~unsupported;
 assign mem_valid = mem_ren | mem_wen; // if either load or store then it's a mem op
-assign unsupported_instr = unsupported & iv_if_id;
+assign illegal_instr = unsupported & iv_if_id;
 
 logic load_unsigned, load_unsigned_ex, is_jalr_ex;
 logic [4:0] rs1_addr_ex, rs2_addr_ex, rd_addr_ex;
@@ -194,6 +202,20 @@ mrv32_lsu lsu(.clk(clk), .rst_n(rst_n), .b_valid(b_valid), .b_addr(b_addr), .b_w
               .b_rdata(b_rdata), .b_rvalid(b_rvalid), .mem_valid(mem_valid_mem), .mem_ren(mem_ren_mem),
               .mem_wen(mem_wen_mem), .mem_wstrb(mem_wstrb_mem), .load_unsigned(load_unsigned_mem), .eff_addr(alu_result_mem),
               .lsu_done(lsu_done), .load_data(load_data), .store_data(rs2_mem));
+
+/** Peripheral Decoder (within MEM stage) **/
+mrv32_periph_decoder #(
+    .PERIPH_BASE(PERIPH_BASE),
+    .PERIPH_END (PERIPH_END)
+) periph_dec (
+    .mem_wen    (mem_wen_mem & lsu_done),
+    .eff_addr   (alu_result_mem),
+    .store_data (rs2_mem),
+    .periph_valid(periph_valid),
+    .periph_addr (periph_addr),
+    .periph_wdata(periph_wdata)
+);
+
 
 logic stall; // 1 => stall the pipeline
 
