@@ -35,20 +35,6 @@ ISS_BIN  = os.path.join(ISS_DIR, "mrv_iss")
 PROG_ELF = os.path.join(HW_SIM, "validation.elf")
 PROG_HEX = os.path.join(HW_SIM, "validation.hex")
 
-CORE_FILES = [
-    "mrv32_pkg.sv",
-    "mrv32_alu.sv",
-    "mrv32_fetch.sv",
-    "mrv32_id.sv",
-    "mrv32_rf.sv",
-    "mrv32_imm_gen.sv",
-    "mrv32_lsu.sv",
-    "mrv32_bru.sv",
-    "mrv32_wb.sv",
-    "mrv32_core.sv",
-    "mrv32_periph.sv",
-]
-
 INFRA_SOURCES = [
     "../RTL/mem_dual_port.sv",
     "../RTL/peripherals.sv",
@@ -143,20 +129,13 @@ def compile_source(src):
         ], cwd=HW_SIM, desc=f"Compiling {src} → validation.elf")
 
     elif ext == ".s":
-        obj = os.path.join(HW_SIM, "asm_obj.o")
-        run([
-            "riscv64-unknown-elf-as",
-            "-march=rv32i", "-mabi=ilp32",
-            os.path.abspath(src), "-o", obj
-        ], cwd=HW_SIM, desc=f"Assembling {src} → asm_obj.o")
         run([
             "riscv64-unknown-elf-gcc",
             "-march=rv32i", "-mabi=ilp32",
-            "-ffreestanding", "-nostdlib", "-nostartfiles",
-            f"-T{LINK_DIR}/link.ld",
-            f"{LINK_DIR}/crt0.s",
-            obj, "-o", PROG_ELF, "-lgcc"
-        ], cwd=HW_SIM, desc="Linking → validation.elf")
+            "-ffreestanding", "-nostdlib", "-nostartfiles", "-Ttext=0x0",
+            os.path.abspath(src),
+            "-o", PROG_ELF
+        ], cwd=HW_SIM, desc=f"Compiling {src} → validation.elf")
     else:
         print(f"Unsupported source type: {ext}")
         sys.exit(0)
@@ -179,14 +158,16 @@ def run_iss(max_instrs, mem_start, mem_end):
     ], cwd=HW_SIM, desc=f"Running ISS ({max_instrs} instrs)")
     return out
 
+import glob
+
 def compile_rtl(core_version=None):
     banner("Step 3: Compile RTL")
 
     if core_version is None:
-        core_dir = "../RTL"
+        core_dir = os.path.join(HW_SIM, "../RTL")
     else:
-        core_dir = f"../RTL/core_{core_version}"
-        if not os.path.isdir(os.path.join(HW_SIM, core_dir)):
+        core_dir = os.path.join(HW_SIM, f"../RTL/core_{core_version}")
+        if not os.path.isdir(core_dir):
             print(f"\nError: core version '{core_version}' not found at {core_dir}")
             available = [
                 d.replace("core_", "")
@@ -197,10 +178,30 @@ def compile_rtl(core_version=None):
                 print(f"Available versions: {', '.join(sorted(available))}")
             sys.exit(1)
 
-    core_srcs = [f"{core_dir}/{f}" for f in CORE_FILES]
-    all_srcs  = core_srcs + INFRA_SOURCES
+    pkg  = os.path.join(core_dir, "mrv32_pkg.sv")
+    core = os.path.join(core_dir, "mrv32_core.sv")
+
+    for f, name in [(pkg, "mrv32_pkg.sv"), (core, "mrv32_core.sv")]:
+        if not os.path.isfile(f):
+            print(f"\nError: {name} not found in {core_dir}")
+            sys.exit(1)
+
+    middle = sorted([
+        f for f in glob.glob(os.path.join(core_dir, "mrv32_*.sv"))
+        if not f.endswith("mrv32_pkg.sv") and not f.endswith("mrv32_core.sv")
+    ])
+
+    all_srcs = (
+        [pkg] +
+        middle +
+        [core] +
+        [os.path.join(HW_SIM, "../RTL/mem_dual_port.sv")] +
+        [os.path.join(HW_SIM, "../RTL/peripherals.sv")] +
+        ["core_tb.sv"]
+    )
 
     print(f"  Core directory: {core_dir}")
+    print(f"  Sources: {[os.path.basename(s) for s in all_srcs]}")
     run(["iverilog", "-g2012", "-o", "sim"] + all_srcs,
         cwd=HW_SIM, desc="Compiling RTL")
 

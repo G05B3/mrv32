@@ -12,6 +12,8 @@
 #
 # Core version examples: -c v1.0  -c v2.0  -c v1.1
 # If -c is omitted, uses the working copy directly in ../RTL/
+# All mrv32_*.sv files in the core directory are compiled automatically.
+# mrv32_pkg.sv is always first, mrv32_core.sv is always last.
 
 PROG="hex_files/test1.hex"
 MAX_INSTRS=10000
@@ -19,10 +21,6 @@ DUMP_START="00000000"
 DUMP_LEN=64
 TRACE=0
 CORE_VERSION=""
-
-CORE_FILES="mrv32_pkg.sv mrv32_alu.sv mrv32_fetch.sv mrv32_id.sv
-            mrv32_rf.sv mrv32_imm_gen.sv mrv32_lsu.sv mrv32_bru.sv
-            mrv32_wb.sv mrv32_core.sv mrv32_periph.sv"
 
 usage() {
   grep '^#' "$0" | grep -v '#!/' | sed 's/^# \{0,1\}//'
@@ -62,15 +60,29 @@ if [ ! -f "$PROG" ]; then
   exit 0
 fi
 
-# Build core source list from chosen directory
-CORE_SRCS=""
-for f in $CORE_FILES; do
-  CORE_SRCS="$CORE_SRCS ${CORE_DIR}/${f}"
-done
+# Build core source list: pkg first, core last, everything else in between
+PKG="${CORE_DIR}/mrv32_pkg.sv"
+CORE="${CORE_DIR}/mrv32_core.sv"
 
+if [ ! -f "$PKG" ]; then
+  echo "Error: mrv32_pkg.sv not found in ${CORE_DIR}"
+  exit 1
+fi
+if [ ! -f "$CORE" ]; then
+  echo "Error: mrv32_core.sv not found in ${CORE_DIR}"
+  exit 1
+fi
+
+MIDDLE=$(ls ${CORE_DIR}/mrv32_*.sv 2>/dev/null \
+  | grep -v 'mrv32_pkg\.sv' \
+  | grep -v 'mrv32_core\.sv')
+
+CORE_SRCS="$PKG $MIDDLE $CORE"
+
+#../RTL/mem_dual_port.sv \  <--- add this instead of instant_mem.sv in the final version
 iverilog -g2012 -o sim \
   $CORE_SRCS \
-  ../RTL/mem_dual_port.sv \
+  ../RTL/instant_mem.sv \
   ../RTL/peripherals.sv \
   core_tb.sv \
   || exit 0

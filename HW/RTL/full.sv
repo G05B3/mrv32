@@ -85,27 +85,29 @@ package mrv32_pkg;
 
 endpackage : mrv32_pkg
 //==============================================================================
-// Module: mrv32_fetch v1.0
+// Module: mrv32_fetch v1.1
 //------------------------------------------------------------------------------
 // Description:
-//   Instruction Fetch stage with simple request/accept handshake.
+//   Instruction Fetch stage for pipelined execution.
 //
 // Behavior:
-//   - Issues instruction fetch requests to instruction memory.
-//   - Holds fetched instruction until accepted by WB stage.
-//   - PC advances only when instr_accept is asserted.
-//   - Guarantees only one instruction is active in the system.
+//   - Continuously fetches instructions, advancing PC each cycle.
+//   - PC advances by 4 each cycle unless take_branch is asserted,
+//     in which case PC jumps to branch_target.
+//   - Outputs NOP (0x00000013) and instr_valid=0 while waiting for
+//     memory to return data or after a branch redirect.
+//   - instr_valid=1 only when a_rvalid returns a real instruction.
 //
 // Notes:
-//   This stage intentionally prevents instruction overlap to simplify
-//   bring-up and eliminate pipeline hazards.
+//   Branch flush (squashing in-flight instructions) is not yet implemented.
+//   Pipeline stages behind the branch will need to be invalidated separately.
 //
 // Interfaces:
-//   - Memory request/response handshake
-//   - instr_valid / instr_accept handshake with WB
+//   - Memory request/response handshake (always fetching)
+//   - take_branch / branch_target from MEM stage for PC redirect
 //
 // Author: Martim Bento
-// Date  : 01/03/2026
+// Date  : 08/03/2026
 //==============================================================================
 
 import mrv32_pkg::*;
@@ -122,94 +124,54 @@ module mrv32_fetch (
     input  logic [31:0]           a_rdata,
     input  logic                  a_rvalid,
 
-    // Control from core
-    input  logic [31:0]           pc_next,    // next PC value (byte address)
+    // Branch redirect from MEM stage
+    input  logic                  take_branch,
+    input  logic [31:0]           branch_target,
 
-    // Output to core (latched instruction)
+    // Stall from hazard unit
+    input  logic                  stall,
+
+    // Output to IF/ID stage register
     output logic [31:0]           instr,
     output logic [31:0]           pc,
-    output logic                  instr_valid, // 1 when instr holds a valid fetched instruction
-    input  logic                  instr_accept // core pulses when it consumed instr (update PC)
+    output logic                  instr_valid
 );
 
-  typedef enum logic [1:0] { IF_IDLE, IF_REQ, IF_WAIT, IF_HAVE } if_state_t;
-  if_state_t state, state_n;
+  localparam NOP = 32'h00000013; // ADDI x0, x0, 0
 
-  logic [31:0] pc_n;
-  logic [31:0] instr_n;
-  logic        instr_valid_n;
+  logic [31:0] pc_fetch; // PC of the instruction currently being fetched
 
-  // Memory read is always (wstrb==0)
-  assign a_wdata = 32'd0;
-  assign a_wstrb = 4'b0000;
-
-  // Address is current PC truncated to memory address width (byte addressing)
-  assign a_addr  = pc[ADDR_WIDTH-1:0];
-
-  // State / registers
+  // PC register — advances every cycle unless stalled
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      state       <= IF_IDLE;
-      pc          <= 32'd0;
-      instr       <= 32'd0;
-      instr_valid <= 1'b0;
-    end else begin
-      state       <= state_n;
-      pc          <= pc_n;
-      instr       <= instr_n;
-      instr_valid <= instr_valid_n;
+    if (!rst_n)
+      pc_fetch <= 32'd0;
+    else if (!stall) begin
+      if (take_branch)
+        pc_fetch <= branch_target;
+      else
+        pc_fetch <= pc_fetch + 32'd4;
     end
   end
 
-  // Next-state / outputs
-  always_comb begin
-    // defaults
-    state_n       = state;
-    pc_n          = pc;
-    instr_n       = instr;
-    instr_valid_n = instr_valid;
+  // Always request a fetch
+  assign a_valid = 1'b1;
+  assign a_addr  = pc_fetch[ADDR_WIDTH-1:0];
+  assign a_wdata = 32'd0;
+  assign a_wstrb = 4'b0000;
 
-    a_valid       = 1'b0;
-
-    // PC update from core (commit)
-    if (instr_accept) begin
-      pc_n = pc_next;
+  // Output to IF/ID register
+  // pc_fetch is registered so it trails the fetch address by one cycle,
+  // matching the cycle when a_rvalid returns
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      instr       <= NOP;
+      pc          <= 32'd0;
+      instr_valid <= 1'b0;
+    end else if (!stall) begin
+      instr       <= a_rvalid ? a_rdata : NOP;
+      pc          <= pc_fetch;
+      instr_valid <= a_rvalid;
     end
-
-    case (state)
-      IF_IDLE: begin
-        // Start by requesting first fetch immediately after reset release
-        state_n = IF_REQ;
-      end
-
-      IF_REQ: begin
-        // Enqueue a fetch request (one-cycle pulse)
-        a_valid = 1'b1;
-        state_n = IF_WAIT;
-      end
-
-      IF_WAIT: begin
-        // Wait for memory to return instruction
-        if (a_rvalid) begin
-          instr_n       = a_rdata;
-          instr_valid_n = 1'b1;
-          state_n       = IF_HAVE;
-        end
-      end
-
-      IF_HAVE: begin
-        // Hold instruction stable until core accepts it
-        if (instr_accept) begin
-          state_n       = IF_REQ; // request next instruction (PC is updated by core via pc_set)
-        end
-        instr_valid_n = 1'b0;
-        instr_n = 0;
-      end
-
-      default: begin
-        state_n = IF_IDLE;
-      end
-    endcase
   end
 
 endmodule//==============================================================================
@@ -490,58 +452,6 @@ module mrv32_decode(
   );
 
 endmodule//==============================================================================
-// Module: mrv32_regfile v1.0
-//------------------------------------------------------------------------------
-// Description:
-//   32 x 32-bit register file.
-//
-// Features:
-//   - 2 read ports
-//   - 1 write port
-//   - x0 hardwired to zero
-//
-// Notes:
-//   Writes occur in WB stage.
-//   Designed to support forwarding in future revisions.
-//
-// Author: Martim Bento
-// Date  : 01/03/2026
-//==============================================================================
-
-module mrv32_regfile (
-
-    input logic clk,
-    input logic rst_n,
-    input logic [4:0] rs1_addr,
-    input logic [4:0] rs2_addr,
-    input logic [4:0] rd_addr,
-    input logic [31:0] rd_data,
-    input logic reg_wen,
-    output logic [31:0] rs1_data,
-    output logic [31:0] rs2_data
-);
-
-logic [31:0] registers [0: 30]; // 31 real registers, x1 - x31; x0 is hardwired to 0
-
-// Read Logic
-always_comb begin
-    rs1_data = (rs1_addr == 5'b00000) ? 32'b0 : registers[rs1_addr - 1];
-    rs2_data = (rs2_addr == 5'b00000) ? 32'b0 : registers[rs2_addr - 1];
-end
-
-// Write Logic
-always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        for (int i = 0; i < 31; i++) begin
-            registers[i] <= 32'b0;
-        end
-    end else if (reg_wen && rd_addr != 5'b00000) begin
-        registers[rd_addr - 1] <= rd_data;
-    end
-end
-
-
-endmodule//==============================================================================
 // Module: mrv32_alu v1.0
 //------------------------------------------------------------------------------
 // Description:
@@ -587,6 +497,51 @@ module mrv32_alu (
       default: result = 32'd0; // Default case for unsupported operations
     endcase
   end
+
+endmodule//==============================================================================
+// Module: mrv32_bru v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Branch resolution unit.
+//
+// Function:
+//   - Evaluates branch conditions using ALU result flags
+//   - Generates take_branch signal
+//
+// Supported Branches:
+//   - BEQ, BNE
+//   - BLT, BGE
+//   - BLTU, BGEU
+//
+//   - JAL, JALR (Unconditional Branches)
+//
+// Notes:
+//   Branch resolution currently occurs in MEM stage.
+//
+// Author: Martim Bento
+// Date  : 01/03/2026
+//==============================================================================
+
+module mrv32_bru (
+
+    input logic [1:0] br_sel,
+    input logic [31:0] alu_result,
+    output logic take_branch
+
+);
+
+    logic is_Zero;
+    assign is_Zero = alu_result == 32'd0;
+
+    always_comb begin
+        case (br_sel)
+            2'b00: take_branch = 1'b0; // not a branch
+            2'b01: take_branch = 1'b1; // unconditional jump (JAL/JALR)
+            2'b10: take_branch = is_Zero ? 1'b1 : 1'b0; // branch (BEQ, BGE, BGEU)
+            2'b11: take_branch = is_Zero ? 1'b0 : 1'b1; // branch (BNE, BLT, BLTU)
+            default: take_branch = 1'b0;
+        endcase
+    end
 
 endmodule//==============================================================================
 // Module: mrv32_lsu v1.0
@@ -808,7 +763,45 @@ module mrv32_lsu (
   end
 
 endmodule//==============================================================================
-// Module: mrv32_wb v1.0
+// Module: mrv32_periph_decoder v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Peripheral address decoder for the MRV32 core.
+//
+// Responsibilities:
+//   - Detect store operations targeting the peripheral address range
+//   - Forward address and write data to the peripheral bus
+//   - Assert periph_valid for exactly one cycle per peripheral store
+//
+// Notes:
+//   Peripheral address range is parameterizable via PERIPH_BASE and PERIPH_END.
+//   Module is intentionally agnostic to pipeline internals — qualification
+//   of mem_wen with lsu_done is handled at the instantiation site in mrv32_core.
+//   Reads from peripheral addresses are not supported in this version.
+//
+// Author: Martim Bento
+// Date  : 07/03/2026
+//==============================================================================
+
+module mrv32_periph_decoder #(
+    parameter logic [31:0] PERIPH_BASE,
+    parameter logic [31:0] PERIPH_END
+) (
+    input logic mem_wen,
+    input logic [31:0] eff_addr,
+    input logic [31:0] store_data,
+    
+    output logic periph_valid,
+    output logic [31:0] periph_addr,
+    output logic [31:0] periph_wdata
+);
+
+assign periph_valid = mem_wen & (eff_addr >= PERIPH_BASE && eff_addr < PERIPH_END);
+assign periph_addr = eff_addr;
+assign periph_wdata = store_data;
+
+endmodule//==============================================================================
+// Module: mrv32_wb v1.1
 //------------------------------------------------------------------------------
 // Description:
 //   Writeback stage of the RV32I core.
@@ -825,7 +818,7 @@ endmodule//=====================================================================
 //   Designed to support future pipelined execution.
 //
 // Author: Martim Bento
-// Date  : 01/03/2026
+// Date  : 08/03/2026
 //==============================================================================
 
 module mrv32_wb (
@@ -835,18 +828,15 @@ module mrv32_wb (
     // Decoded/latched control for this instruction
     input  logic        reg_wen_in,
     input  logic        mem_ren_in,
-    input  logic        is_lui_in,
-    input  logic        is_auipc_in,
+
     input  logic        take_branch,
 
     input  logic [4:0]  rd_addr_in,
 
     // Latched data inputs
     input  logic [31:0] alu_result_in,
-    input  logic [31:0] imm_in,
     input  logic [31:0] load_data_in,
     input  logic [31:0] pc_in,         // PC of the retiring instruction
-    input  logic [31:0] jal_target_in,  // already computed target (pc + imm) in wrapper/EX
 
     // Outputs to register file write port
     output logic        rf_wen,
@@ -854,8 +844,7 @@ module mrv32_wb (
     output logic [31:0] rf_wdata,
 
     // Outputs to fetch / core control
-    output logic        instr_accept,   // commit pulse
-    output logic [31:0] pc_next         // next PC on commit
+    output logic        instr_accept   // commit pulse
 );
 
   // default outputs
@@ -865,21 +854,13 @@ module mrv32_wb (
     rf_wdata    = 32'd0;
 
     instr_accept = 1'b0;
-    pc_next      = pc_in + 32'd4;
 
     if (wb_valid) begin
       // Commit this instruction (blocking core)
       instr_accept = 1'b1;
 
-      // Next PC: sequential unless JAL or JALR
-      if (take_branch) pc_next = jal_target_in;
-
       // Writeback mux
-      if (is_lui_in) begin
-        rf_wdata = imm_in;
-      end else if (is_auipc_in) begin
-        rf_wdata = imm_in + pc_in;
-      end else if (take_branch) begin
+      if (take_branch) begin
         rf_wdata = pc_in + 32'd4;
       end else if (mem_ren_in) begin
         rf_wdata = load_data_in;
@@ -892,8 +873,86 @@ module mrv32_wb (
     end
   end
 
+endmodule/** Hazard Detection Unit **/
+
+module mrv32_hzdu (
+    input logic reg_wen_ex,
+    input logic [4:0] rd_ex, // alu_result_ex
+    input logic reg_wen_mem,
+    input logic [4:0] rd_mem, // alu_result_mem
+    input logic [4:0] rs1_id,
+    input logic [4:0] rs2_id,
+    input logic rs2_id_used,
+    input logic mem_ren_ex,
+    output logic fwd_rs1_ex,
+    output logic fwd_rs2_ex,
+    output logic fwd_rs1_mem,
+    output logic fwd_rs2_mem,
+    output logic load_stall
+);
+
+assign fwd_rs1_ex = (rd_ex == rs1_id) & reg_wen_ex & (rd_ex != 0);
+assign fwd_rs2_ex = (rd_ex == rs2_id) & reg_wen_ex & (rd_ex != 0) & rs2_id_used;
+
+assign fwd_rs1_mem = (rd_mem == rs1_id) & reg_wen_mem & (rd_mem != 0);
+assign fwd_rs2_mem = (rd_mem == rs2_id) & reg_wen_mem & (rd_mem != 0) & rs2_id_used;
+
+assign load_stall = mem_ren_ex & ((rd_ex == rs1_id) | ((rd_ex == rs2_id) & rs2_id_used)) & (rd_ex != 0);
+
 endmodule//==============================================================================
-// Module: mrv32_core v1.0
+// Module: mrv32_regfile v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   32 x 32-bit register file.
+//
+// Features:
+//   - 2 read ports
+//   - 1 write port
+//   - x0 hardwired to zero
+//
+// Notes:
+//   Writes occur in WB stage.
+//   Designed to support forwarding in future revisions.
+//
+// Author: Martim Bento
+// Date  : 01/03/2026
+//==============================================================================
+
+module mrv32_regfile (
+
+    input logic clk,
+    input logic rst_n,
+    input logic [4:0] rs1_addr,
+    input logic [4:0] rs2_addr,
+    input logic [4:0] rd_addr,
+    input logic [31:0] rd_data,
+    input logic reg_wen,
+    output logic [31:0] rs1_data,
+    output logic [31:0] rs2_data
+);
+
+logic [31:0] registers [0: 30]; // 31 real registers, x1 - x31; x0 is hardwired to 0
+
+// Read Logic
+always_comb begin
+    rs1_data = (rs1_addr == 5'b00000) ? 32'b0 : registers[rs1_addr - 1];
+    rs2_data = (rs2_addr == 5'b00000) ? 32'b0 : registers[rs2_addr - 1];
+end
+
+// Write Logic
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        for (int i = 0; i < 31; i++) begin
+            registers[i] <= 32'b0;
+        end
+    end else if (reg_wen && rd_addr != 5'b00000) begin
+        registers[rd_addr - 1] <= rd_data;
+    end
+end
+
+
+endmodule//==============================================================================
+// Module: mrv32_core v1.1
 //------------------------------------------------------------------------------
 // Description:
 //   Single-issue RV32I core with staged pipeline registers.
@@ -920,7 +979,10 @@ endmodule//=====================================================================
 
 import mrv32_pkg::*;
 
-module mrv32_core (
+module mrv32_core #(
+    parameter logic [31:0] PERIPH_BASE = 32'h10000000,
+    parameter logic [31:0] PERIPH_END = 32'h10001000
+) (
     input logic clk,
     input logic rst_n,
 
@@ -937,8 +999,13 @@ module mrv32_core (
     output logic [3:0]            b_wstrb,
     input  logic [31:0]           b_rdata,
     input  logic                  b_rvalid,
+
+    // Peripherals
+    output logic periph_valid,
+    output logic [31:0] periph_addr,
+    output logic [31:0] periph_wdata,
     
-    output logic unsupported_instr
+    output logic illegal_instr
 );
 
 logic [31:0] instr_if, instr;
@@ -953,8 +1020,8 @@ logic [31:0] rf_wdata;
 
 /** Fetch **/
 mrv32_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_valid), .a_addr(a_addr),
-                .a_wdata(a_wdata), .a_wstrb(a_wstrb), .a_rdata(a_rdata), .instr(instr_if), .pc(pc_if), .pc_next(pc_next),
-                .instr_valid(instr_valid_fetch), .instr_accept(instr_accept));
+                .a_wdata(a_wdata), .a_wstrb(a_wstrb), .a_rdata(a_rdata), .instr(instr_if), .pc(pc_if),
+                .instr_valid(instr_valid_fetch), .branch_target(jal_target), .take_branch(take_branch), .stall(stall));
 
 logic [64:0] reg_if_id;
 // Stage Register between IF and ID
@@ -991,7 +1058,7 @@ mrv32_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd
 
 assign instr_valid_decode = iv_if_id & ~unsupported;
 assign mem_valid = mem_ren | mem_wen; // if either load or store then it's a mem op
-assign unsupported_instr = unsupported & iv_if_id;
+assign illegal_instr = unsupported & iv_if_id;
 
 logic load_unsigned, load_unsigned_ex, is_jalr_ex;
 logic [4:0] rs1_addr_ex, rs2_addr_ex, rd_addr_ex;
@@ -1031,47 +1098,53 @@ assign imm_ex       = reg_id_ex[32:1];
 assign mem_valid_ex = reg_id_ex[0];
 
 
-logic [31:0] rs1_data, rs2_data, op2, alu_result;
+logic [31:0] rs1_data, rs2_data, op2, op1, alu_result;
 
 mrv32_regfile mrv_rf(.clk(clk), .rst_n(rst_n), .rs1_addr(rs1_addr_ex), .rs2_addr(rs2_addr_ex), .rd_addr(rf_waddr),
                     .rd_data(rf_wdata), .reg_wen(rf_wen), .rs1_data(rs1_data), .rs2_data(rs2_data));
 
-assign op2 = alusrc_ex ? imm_ex : rs2_data;
+// RS1 may be forwarded from EX or MEM
+assign op1 = is_lui_ex  ? 32'd0   :
+             is_auipc_ex ? pc_ex  :
+                           rs1_fwd;
+
+// RS2 may be forwared from EX or MEM
+assign op2 = (is_lui_ex | is_auipc_ex) ? imm_ex :
+             alusrc_ex                 ? imm_ex  :
+                                         rs2_fwd;
 
 /** ALU (EX) **/
-mrv32_alu mrv_alu(.op1(rs1_data), .op2(op2), .aluop(aluop_ex), .result(alu_result));
+mrv32_alu mrv_alu(.op1(op1), .op2(op2), .aluop(aluop_ex), .result(alu_result));
 
 
 logic [4:0] rd_addr_mem;
-logic mem_ren_mem, mem_wen_mem, mem_valid_mem, reg_wen_mem, is_lui_mem, is_auipc_mem, instr_valid_mem;
+logic mem_ren_mem, mem_wen_mem, mem_valid_mem, reg_wen_mem, instr_valid_mem;
 logic [3:0] mem_wstrb_mem;
 logic [31:0] alu_result_mem, imm_mem, rs2_mem;
 logic load_unsigned_mem, is_jalr_mem;
-logic [147:0] reg_ex_mem;
+logic [145:0] reg_ex_mem;
 // Stage Register between EX and MEM
 always_ff @(posedge clk) begin
     if (!rst_n)
         reg_ex_mem <= 0;
     else if (!stall)
-        reg_ex_mem <= {br_sel_ex, is_jalr_ex, is_auipc_ex, rs2_data, pc_ex, imm_ex, instr_valid_ex,
-        load_unsigned_ex, rd_addr_ex, mem_ren_ex, mem_wen_ex, mem_wstrb_ex, reg_wen_ex, is_lui_ex, mem_valid_ex,
+        reg_ex_mem <= {br_sel_ex, is_jalr_ex, rs2_fwd, pc_ex, imm_ex, instr_valid_ex,
+        load_unsigned_ex, rd_addr_ex, mem_ren_ex, mem_wen_ex, mem_wstrb_ex, reg_wen_ex, mem_valid_ex,
         alu_result};
 end
 
-assign br_sel_mem = reg_ex_mem[147:146];
-assign is_jalr_mem = reg_ex_mem[145];
-assign is_auipc_mem = reg_ex_mem[144];
-assign rs2_mem = reg_ex_mem[143:112];
-assign pc_mem = reg_ex_mem[111:80];
-assign imm_mem = reg_ex_mem[79:48];
-assign instr_valid_mem = reg_ex_mem[47];
-assign load_unsigned_mem = reg_ex_mem[46];
-assign rd_addr_mem = reg_ex_mem[45:41];
-assign mem_ren_mem = reg_ex_mem[40];
-assign mem_wen_mem = reg_ex_mem[39];
-assign mem_wstrb_mem = reg_ex_mem[38:35];
-assign reg_wen_mem = reg_ex_mem[34];
-assign is_lui_mem = reg_ex_mem[33];
+assign br_sel_mem = reg_ex_mem[145:144];
+assign is_jalr_mem = reg_ex_mem[143];
+assign rs2_mem = reg_ex_mem[142:111];
+assign pc_mem = reg_ex_mem[110:79];
+assign imm_mem = reg_ex_mem[78:47];
+assign instr_valid_mem = reg_ex_mem[46];
+assign load_unsigned_mem = reg_ex_mem[45];
+assign rd_addr_mem = reg_ex_mem[44:40];
+assign mem_ren_mem = reg_ex_mem[39];
+assign mem_wen_mem = reg_ex_mem[38];
+assign mem_wstrb_mem = reg_ex_mem[37:34];
+assign reg_wen_mem = reg_ex_mem[33];
 assign mem_valid_mem = reg_ex_mem[32];
 assign alu_result_mem = reg_ex_mem[31:0];
 
@@ -1079,6 +1152,10 @@ assign alu_result_mem = reg_ex_mem[31:0];
 logic take_branch, take_branch_wb;
 mrv32_bru mrv_bru(.br_sel(br_sel_mem), .alu_result(alu_result_mem), .take_branch(take_branch));
 
+
+// Jump target, wired from MEM back to Fetch
+logic [31:0] jal_target;
+assign jal_target = is_jalr_mem ? (alu_result_mem & ~32'd1) : (pc_mem + imm_mem);
 
 logic lsu_done;
 logic [31:0] load_data;
@@ -1089,259 +1166,91 @@ mrv32_lsu lsu(.clk(clk), .rst_n(rst_n), .b_valid(b_valid), .b_addr(b_addr), .b_w
               .mem_wen(mem_wen_mem), .mem_wstrb(mem_wstrb_mem), .load_unsigned(load_unsigned_mem), .eff_addr(alu_result_mem),
               .lsu_done(lsu_done), .load_data(load_data), .store_data(rs2_mem));
 
+/** Peripheral Decoder (within MEM stage) **/
+mrv32_periph_decoder #(
+    .PERIPH_BASE(PERIPH_BASE),
+    .PERIPH_END (PERIPH_END)
+) periph_dec (
+    .mem_wen    (mem_wen_mem & lsu_done),
+    .eff_addr   (alu_result_mem),
+    .store_data (rs2_mem),
+    .periph_valid(periph_valid),
+    .periph_addr (periph_addr),
+    .periph_wdata(periph_wdata)
+);
+
+
 logic stall; // 1 => stall the pipeline
 
 assign stall = mem_valid_mem & !lsu_done;
 
 logic [4:0] rd_addr_wb;
-logic instr_valid_wb, reg_wen_wb, is_lui_wb, is_auipc_wb, mem_ren_wb, is_jalr_wb;
-logic [31:0] alu_result_wb, load_data_wb, imm_wb;
+logic instr_valid_wb, reg_wen_wb, mem_ren_wb;
+logic [31:0] alu_result_wb, load_data_wb;
 
 logic true_instr_valid;
 assign true_instr_valid = instr_valid_mem & (!mem_valid_mem | lsu_done);
 
-logic [139:0] reg_mem_wb;
+logic [104:0] reg_mem_wb;
 // Stage Register between MEM and WB
 always_ff @(posedge clk) begin
     if (!rst_n)
         reg_mem_wb <= 0;
     else if (!stall)
-        reg_mem_wb <= {take_branch, is_jalr_mem, is_auipc_mem, pc_mem, imm_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, is_lui_mem, alu_result_mem, load_data};
+        reg_mem_wb <= {take_branch, pc_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, alu_result_mem, load_data};
 end
 
-assign take_branch_wb = reg_mem_wb[139];
-assign is_jalr_wb = reg_mem_wb[138];
-assign is_auipc_wb = reg_mem_wb[137];
-assign pc_wb = reg_mem_wb[136:105];
-assign imm_wb = reg_mem_wb[104:73];
-assign mem_ren_wb = reg_mem_wb[72];
-assign instr_valid_wb = reg_mem_wb[71];
-assign rd_addr_wb = reg_mem_wb[70:66];
-assign reg_wen_wb = reg_mem_wb[65];
-assign is_lui_wb = reg_mem_wb[64];
+assign take_branch_wb = reg_mem_wb[104];
+assign pc_wb = reg_mem_wb[103:72];
+assign mem_ren_wb = reg_mem_wb[71];
+assign instr_valid_wb = reg_mem_wb[70];
+assign rd_addr_wb = reg_mem_wb[69:65];
+assign reg_wen_wb = reg_mem_wb[64];
 assign alu_result_wb = reg_mem_wb[63:32];
 assign load_data_wb = reg_mem_wb[31:0];
 
-logic [31:0] jal_target;
-assign jal_target = is_jalr_wb ? (alu_result_wb & ~32'd1) : (pc_wb + imm_wb);
+// instr_accept: debug signal, to count accepted instructions. TODO: Add CSR with minstret and wire this there instead
 
 /** Write Back **/
-mrv32_wb wb(.wb_valid(instr_valid_wb), .reg_wen_in(reg_wen_wb), .mem_ren_in(mem_ren_wb), .is_lui_in(is_lui_wb),
-            .is_auipc_in(is_auipc_wb), .take_branch(take_branch_wb),.rd_addr_in(rd_addr_wb), .alu_result_in(alu_result_wb), .load_data_in(load_data_wb),
-            .imm_in(imm_wb), .pc_in(pc_wb), .jal_target_in(jal_target),
-            .instr_accept(instr_accept), .pc_next(pc_next), .rf_wen(rf_wen), .rf_waddr(rf_waddr), .rf_wdata(rf_wdata));
+mrv32_wb wb(.wb_valid(instr_valid_wb), .reg_wen_in(reg_wen_wb), .mem_ren_in(mem_ren_wb), .take_branch(take_branch_wb),
+            .rd_addr_in(rd_addr_wb), .alu_result_in(alu_result_wb), .load_data_in(load_data_wb),
+            .pc_in(pc_wb), .instr_accept(instr_accept), .rf_wen(rf_wen), .rf_waddr(rf_waddr), .rf_wdata(rf_wdata));
 
-endmodule;// =============================================================================
-// dual_port_byte_mem
-// =============================================================================
-// Byte-addressed, dual-port memory model for RTL simulation.
-//
-// Intended use:
-//   - CPU bring-up and cycle-level simulation (NOT meant for synthesis).
-//   - Works well as a stand-in for an I$ (Port A) and D$ / LSU (Port B).
-//   - Supports loading program images via $readmemh into the public `mem[]` array.
-//
-// Addressing / Endianness:
-//   - Byte addressed: address selects a byte in `mem[]`.
-//   - 32-bit reads return 4 consecutive bytes in little-endian order:
-//       rdata[7:0]   = mem[addr+0]
-//       rdata[15:8]  = mem[addr+1]
-//       rdata[23:16] = mem[addr+2]
-//       rdata[31:24] = mem[addr+3]
-//   - This matches RV32 little-endian instruction/data layout.
-//
-// Ports / Protocol (both ports identical):
-//   Inputs:
-//     *valid : when 1, a request is accepted on the rising edge of clk.
-//     *addr  : byte address for the request.
-//     *wdata : write data (used when *wstrb != 0).
-//     *wstrb : write strobe per byte lane (little-endian lanes):
-//              wstrb[0] -> writes mem[addr+0] with wdata[7:0]
-//              wstrb[1] -> writes mem[addr+1] with wdata[15:8]
-//              wstrb[2] -> writes mem[addr+2] with wdata[23:16]
-//              wstrb[3] -> writes mem[addr+3] with wdata[31:24]
-//              wstrb == 0 implies a read request.
-//   Outputs:
-//     *rvalid: asserted when *rdata corresponds to a previous accepted request.
-//     *rdata : 32-bit read data corresponding to the address captured with the
-//              request that produced this response.
-//
-// Latency:
-//   - RD_LATENCY parameter controls the internal request pipeline depth.
-//   - This model pipelines requests and produces responses in order.
-//   - Effective request->response latency depends on implementation details;
-//     users should rely on *rvalid rather than assuming a fixed cycle count.
-//
-// Ordering / Concurrency:
-//   - Each port is independent; both ports can accept one request per cycle.
-//   - Responses for a given port are returned in the same order requests were
-//     accepted on that port.
-//   - No backpressure/ready signal is modeled (always "accepts" when *valid=1).
-//
-// Simultaneous read/write to same address:
-//   - WRITE_FIRST parameter (best-effort model):
-//       0: read-first (default) behavior in ambiguous same-cycle cases
-//       1: write-first behavior for the special case RD_LATENCY==1 and same-port
-//          read+write overlap (limited corner-case support; see code).
-//
-// Bounds behavior:
-//   - Byte reads out of range return 0.
-//   - Writes out of range are ignored (guarded by address checks).
-//
-// Notes:
-//   - Because `mem` is declared as a public byte array, a testbench can do:
-//       $readmemh("program.hex", dut.mem);
-//   - If you later add caches or a bus, keep using *rvalid to align responses.
-// =============================================================================
-module dual_port_byte_mem #(
-  parameter integer MEM_BYTES    = 64 * 1024,
-  parameter integer ADDR_WIDTH   = $clog2(MEM_BYTES),
 
-  // Read latency in cycles (>=1 recommended for CPU simulation)
-  parameter integer RD_LATENCY   = 1,
+logic fwd_rs1_ex, fwd_rs2_ex, fwd_rs1_mem, fwd_rs2_mem, load_stall;
 
-  // If 1: model "write-first" when read+write same address same cycle on same port
-  // If 0: model "read-first" (read old data). This mainly matters in corner cases.
-  parameter integer WRITE_FIRST  = 0
-) (
-  input  logic                  clk,
-
-  // Port A
-  input  logic                  a_valid,
-  input  logic [ADDR_WIDTH-1:0]  a_addr,
-  input  logic [31:0]           a_wdata,
-  input  logic [3:0]            a_wstrb,
-  output logic [31:0]           a_rdata,
-  output logic                  a_rvalid,   // NEW: indicates rdata corresponds to a past request
-
-  // Port B
-  input  logic                  b_valid,
-  input  logic [ADDR_WIDTH-1:0]  b_addr,
-  input  logic [31:0]           b_wdata,
-  input  logic [3:0]            b_wstrb,
-  output logic [31:0]           b_rdata,
-  output logic                  b_rvalid
+/** Hazard Detection Unit **/
+mrv32_hzdu hzdu (
+    .reg_wen_ex  (reg_wen_mem),    // producer one stage ahead of EX = MEM
+    .rd_ex       (rd_addr_mem),
+    .reg_wen_mem (reg_wen_wb),     // producer two stages ahead = WB
+    .rd_mem      (rd_addr_wb),
+    .rs1_id      (rs1_addr_ex),    // consumer in EX
+    .rs2_id      (rs2_addr_ex),    // consumer in EX
+    .rs2_id_used (!alusrc_ex | mem_wen_ex),
+    .mem_ren_ex  (mem_ren_mem),
+    .fwd_rs1_ex  (fwd_rs1_ex),
+    .fwd_rs2_ex  (fwd_rs2_ex),
+    .fwd_rs1_mem (fwd_rs1_mem),
+    .fwd_rs2_mem (fwd_rs2_mem),
+    .load_stall  (load_stall)
 );
 
-  // Byte-addressed storage
-  byte mem [0:MEM_BYTES-1];
+/** Forwarding Connections **/
+logic [31:0] rs1_fwd, rs2_fwd, fwd_val_ex, fwd_val_mem;
 
-  function automatic [7:0] rd8(input integer unsigned addr);
-    if (addr < MEM_BYTES) rd8 = mem[addr];
-    else                  rd8 = 8'h00;
-  endfunction
+// fwd_rs1_ex => producer is in MEM => use br_sel_mem
+assign fwd_val_ex  = (br_sel_mem == BR_ALWAYS) ? pc_mem + 32'd4 : alu_result_mem;
 
-  // -------------------------
-  // Port A pipelines
-  // -------------------------
-  logic [ADDR_WIDTH-1:0] a_addr_pipe [0:RD_LATENCY-1];
-  logic                  a_v_pipe    [0:RD_LATENCY-1];
+// fwd_rs1_mem => producer is in WB => rf_wdata already correct
+assign fwd_val_mem = rf_wdata;
 
-  // -------------------------
-  // Port B pipelines
-  // -------------------------
-  logic [ADDR_WIDTH-1:0] b_addr_pipe [0:RD_LATENCY-1];
-  logic                  b_v_pipe    [0:RD_LATENCY-1];
+assign rs1_fwd = fwd_rs1_ex  ? fwd_val_ex  :
+                 fwd_rs1_mem ? fwd_val_mem  :
+                               rs1_data;
 
-  integer i;
+assign rs2_fwd = fwd_rs2_ex  ? fwd_val_ex  :
+                 fwd_rs2_mem ? fwd_val_mem  :
+                               rs2_data;
 
-  // Optional init (prevents Xs on outputs)
-  initial begin
-    a_rdata  = 32'h0;
-    b_rdata  = 32'h0;
-    a_rvalid = 1'b0;
-    b_rvalid = 1'b0;
-
-    // Init pipelines to 0
-    for (i = 0; i < RD_LATENCY; i = i + 1) begin
-      a_addr_pipe[i] = '0; a_v_pipe[i] = 1'b0;
-      b_addr_pipe[i] = '0; b_v_pipe[i] = 1'b0;
-    end
-  end
-
-  // -------------------------
-  // Writes (posedge)
-  // -------------------------
-  always_ff @(posedge clk) begin
-    if (a_valid) begin
-      if (a_wstrb[0] && (a_addr + 0 < MEM_BYTES)) mem[a_addr + 0] <= a_wdata[7:0];
-      if (a_wstrb[1] && (a_addr + 1 < MEM_BYTES)) mem[a_addr + 1] <= a_wdata[15:8];
-      if (a_wstrb[2] && (a_addr + 2 < MEM_BYTES)) mem[a_addr + 2] <= a_wdata[23:16];
-      if (a_wstrb[3] && (a_addr + 3 < MEM_BYTES)) mem[a_addr + 3] <= a_wdata[31:24];
-    end
-
-    if (b_valid) begin
-      if (b_wstrb[0] && (b_addr + 0 < MEM_BYTES)) mem[b_addr + 0] <= b_wdata[7:0];
-      if (b_wstrb[1] && (b_addr + 1 < MEM_BYTES)) mem[b_addr + 1] <= b_wdata[15:8];
-      if (b_wstrb[2] && (b_addr + 2 < MEM_BYTES)) mem[b_addr + 2] <= b_wdata[23:16];
-      if (b_wstrb[3] && (b_addr + 3 < MEM_BYTES)) mem[b_addr + 3] <= b_wdata[31:24];
-    end
-  end
-
-  // -------------------------
-  // Read request pipelines (posedge)
-  // -------------------------
-  always_ff @(posedge clk) begin
-    // stage 0 captures incoming request
-    a_addr_pipe[0] <= a_addr;
-    a_v_pipe[0]    <= a_valid;
-
-    b_addr_pipe[0] <= b_addr;
-    b_v_pipe[0]    <= b_valid;
-
-    // shift down the pipeline
-    for (i = 1; i < RD_LATENCY; i = i + 1) begin
-      a_addr_pipe[i] <= a_addr_pipe[i-1];
-      a_v_pipe[i]    <= a_v_pipe[i-1];
-
-      b_addr_pipe[i] <= b_addr_pipe[i-1];
-      b_v_pipe[i]    <= b_v_pipe[i-1];
-    end
-  end
-
-  // -------------------------
-  // Read response generation (posedge)
-  // Data corresponds to addr_pipe[RD_LATENCY-1]
-  // -------------------------
-  always_ff @(posedge clk) begin : RESP
-    logic [ADDR_WIDTH-1:0] aa;
-    logic [ADDR_WIDTH-1:0] bb;
-    logic [31:0] a_word;
-    logic [31:0] b_word;
-
-    aa = a_addr_pipe[RD_LATENCY-1];
-    bb = b_addr_pipe[RD_LATENCY-1];
-
-    // Base read data (little-endian assembly)
-    a_word = { rd8(aa + 3), rd8(aa + 2), rd8(aa + 1), rd8(aa + 0) };
-    b_word = { rd8(bb + 3), rd8(bb + 2), rd8(bb + 1), rd8(bb + 0) };
-
-    // Optional same-port write-first modeling (only for same cycle as request stage 0)
-    // This is a corner-case model; you can ignore if you don't care.
-    if (WRITE_FIRST) begin
-      // If the *request being returned now* was issued RD_LATENCY cycles ago,
-      // we do NOT track the historical write strobes for that request here.
-      // So WRITE_FIRST is only meaningful when RD_LATENCY==1.
-      if (RD_LATENCY == 1) begin
-        if (a_valid && (a_wstrb != 0) && (a_addr == aa)) begin
-          if (a_wstrb[0]) a_word[7:0]   = a_wdata[7:0];
-          if (a_wstrb[1]) a_word[15:8]  = a_wdata[15:8];
-          if (a_wstrb[2]) a_word[23:16] = a_wdata[23:16];
-          if (a_wstrb[3]) a_word[31:24] = a_wdata[31:24];
-        end
-        if (b_valid && (b_wstrb != 0) && (b_addr == bb)) begin
-          if (b_wstrb[0]) b_word[7:0]   = b_wdata[7:0];
-          if (b_wstrb[1]) b_word[15:8]  = b_wdata[15:8];
-          if (b_wstrb[2]) b_word[23:16] = b_wdata[23:16];
-          if (b_wstrb[3]) b_word[31:24] = b_wdata[31:24];
-        end
-      end
-    end
-
-    a_rdata  <= a_word;
-    b_rdata  <= b_word;
-    a_rvalid <= a_v_pipe[RD_LATENCY-1];
-    b_rvalid <= b_v_pipe[RD_LATENCY-1];
-  end
-
-endmodule
+endmodule;
