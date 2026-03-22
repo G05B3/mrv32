@@ -7,7 +7,8 @@ _start:
     addi x3, x0, 0xFF     # must NOT execute
     addi x4, x0, 0xFF     # must NOT execute
 taken:
-    addi x3, x0, 0x42     # should execute with x3=0x42
-    addi x4, x0, 0x24
+    addi x3, x3, 0x42     # should execute with x3=0x42
+    addi x4, x4, 0x24
 halt:
     j halt
+    nop

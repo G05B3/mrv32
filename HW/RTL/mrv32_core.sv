@@ -73,9 +73,9 @@ mrv32_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_vali
 logic [64:0] reg_if_id;
 // Stage Register between IF and ID
 always_ff @(posedge clk) begin
-    if (!rst_n)
+    if (!rst_n || take_branch || load_stall)
         reg_if_id <= 0;
-    else if (!stall && !load_stall)
+    else if (!stall)
         reg_if_id <= {instr_if, pc_if, instr_valid_fetch};
 end
 
@@ -105,7 +105,6 @@ mrv32_decode decode(.instr(instr), .rs1_addr(rs1_addr), .rs2_addr(rs2_addr), .rd
 
 assign instr_valid_decode = iv_if_id & ~unsupported;
 assign mem_valid = mem_ren | mem_wen; // if either load or store then it's a mem op
-assign illegal_instr = unsupported & iv_if_id;
 
 logic load_unsigned, load_unsigned_ex, is_jalr_ex;
 logic [4:0] rs1_addr_ex, rs2_addr_ex, rd_addr_ex;
@@ -113,18 +112,19 @@ logic [3:0] aluop_ex;
 logic [3:0] mem_wstrb_ex;
 logic alusrc_ex, mem_ren_ex, mem_wen_ex, reg_wen_ex, is_lui_ex, is_auipc_ex, mem_valid_ex, instr_valid_ex;
 logic [31:0] imm_ex;
-
-logic [98:0] reg_id_ex;
+logic illegal_ex;
+logic [99:0] reg_id_ex;
 // Stage Register between ID and EX
 always_ff @(posedge clk) begin
-    if (!rst_n || load_stall)
+    if (!rst_n || take_branch)
         reg_id_ex <= 0;
     else if (!stall)
-        reg_id_ex <= {br_sel, is_jalr, is_auipc, pc_id, instr_valid_decode,
+        reg_id_ex <= {unsupported & iv_if_id, br_sel, is_jalr, is_auipc, pc_id, instr_valid_decode,
         load_unsigned, rs1_addr, rs2_addr, rd_addr, aluop, alusrc, mem_ren, mem_wen, mem_wstrb, reg_wen, is_lui, imm,
         mem_valid};
 end
 
+assign illegal_ex = reg_id_ex[99];
 assign br_sel_ex = reg_id_ex[98:97];
 assign is_jalr_ex = reg_id_ex[96];
 assign is_auipc_ex = reg_id_ex[95];
@@ -169,17 +169,19 @@ logic mem_ren_mem, mem_wen_mem, mem_valid_mem, reg_wen_mem, instr_valid_mem;
 logic [3:0] mem_wstrb_mem;
 logic [31:0] alu_result_mem, imm_mem, rs2_mem;
 logic load_unsigned_mem, is_jalr_mem;
-logic [145:0] reg_ex_mem;
+logic illegal_mem;
+logic [146:0] reg_ex_mem;
 // Stage Register between EX and MEM
 always_ff @(posedge clk) begin
-    if (!rst_n)
+    if (!rst_n || take_branch)
         reg_ex_mem <= 0;
     else if (!stall)
-        reg_ex_mem <= {br_sel_ex, is_jalr_ex, rs2_fwd, pc_ex, imm_ex, instr_valid_ex,
+        reg_ex_mem <= {illegal_ex, br_sel_ex, is_jalr_ex, rs2_fwd, pc_ex, imm_ex, instr_valid_ex,
         load_unsigned_ex, rd_addr_ex, mem_ren_ex, mem_wen_ex, mem_wstrb_ex, reg_wen_ex, mem_valid_ex,
         alu_result};
 end
 
+assign illegal_mem = reg_ex_mem[146];
 assign br_sel_mem = reg_ex_mem[145:144];
 assign is_jalr_mem = reg_ex_mem[143];
 assign rs2_mem = reg_ex_mem[142:111];
@@ -234,19 +236,21 @@ assign stall = mem_valid_mem & !lsu_done;
 logic [4:0] rd_addr_wb;
 logic instr_valid_wb, reg_wen_wb, mem_ren_wb;
 logic [31:0] alu_result_wb, load_data_wb;
+logic illegal_wb;
 
 logic true_instr_valid;
 assign true_instr_valid = instr_valid_mem & (!mem_valid_mem | lsu_done);
 
-logic [104:0] reg_mem_wb;
+logic [105:0] reg_mem_wb;
 // Stage Register between MEM and WB
 always_ff @(posedge clk) begin
     if (!rst_n)
         reg_mem_wb <= 0;
     else if (!stall)
-        reg_mem_wb <= {take_branch, pc_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, alu_result_mem, load_data};
+        reg_mem_wb <= {illegal_mem, take_branch, pc_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, alu_result_mem, load_data};
 end
 
+assign illegal_wb = reg_mem_wb[105];
 assign take_branch_wb = reg_mem_wb[104];
 assign pc_wb = reg_mem_wb[103:72];
 assign mem_ren_wb = reg_mem_wb[71];
@@ -263,6 +267,8 @@ mrv32_wb wb(.wb_valid(instr_valid_wb), .reg_wen_in(reg_wen_wb), .mem_ren_in(mem_
             .rd_addr_in(rd_addr_wb), .alu_result_in(alu_result_wb), .load_data_in(load_data_wb),
             .pc_in(pc_wb), .instr_accept(instr_accept), .rf_wen(rf_wen), .rf_waddr(rf_waddr), .rf_wdata(rf_wdata));
 
+// An illegal instruction reached WB stage!
+assign illegal_instr = illegal_wb & instr_valid_wb;
 
 logic fwd_rs1_ex, fwd_rs2_ex, fwd_rs1_mem, fwd_rs2_mem, load_stall;
 
@@ -279,15 +285,20 @@ mrv32_hzdu hzdu (
     .fwd_rs1_ex  (fwd_rs1_ex),
     .fwd_rs2_ex  (fwd_rs2_ex),
     .fwd_rs1_mem (fwd_rs1_mem),
-    .fwd_rs2_mem (fwd_rs2_mem),
-    .load_stall  (load_stall)
+    .fwd_rs2_mem (fwd_rs2_mem)
+    //.load_stall  (load_stall)
 );
+assign load_stall = mem_ren_ex & (rd_addr_ex != 5'd0) &
+                    ((rd_addr_ex == rs1_addr) | 
+                     ((rd_addr_ex == rs2_addr) & (!alusrc | mem_wen)));
 
 /** Forwarding Connections **/
 logic [31:0] rs1_fwd, rs2_fwd, fwd_val_ex, fwd_val_mem;
 
 // fwd_rs1_ex => producer is in MEM => use br_sel_mem
-assign fwd_val_ex  = (br_sel_mem == BR_ALWAYS) ? pc_mem + 32'd4 : alu_result_mem;
+logic [31:0] wb_data_mem;
+assign wb_data_mem = mem_ren_mem ? load_data : alu_result_mem;
+assign fwd_val_ex  = (br_sel_mem == BR_ALWAYS) ? pc_mem + 32'd4 : wb_data_mem;
 
 // fwd_rs1_mem => producer is in WB => rf_wdata already correct
 assign fwd_val_mem = rf_wdata;
