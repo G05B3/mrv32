@@ -11,4 +11,3 @@ taken:
     addi x4, x4, 0x24
 halt:
     j halt
-    nop
