@@ -77,13 +77,13 @@ module core_tb;
                core.rs2_addr, core.rs2_data, core.take_branch,
                core.br_sel_ex, core.br_sel_mem, core.mrv_bru.is_Zero);
     end
-    if (rst_n && !trace_retire) begin
+    if (rst_n && trace_retire) begin
       $display("[CYCLE %0d]",cycle);
           if (core.mem_ren_mem) begin
-        $display("LW IN MEM: alu_result_mem=%h load_data=%h lsu_done=%b lsu.state=%0d lsu.b_rdata=%h lsu.mem_wstrb=%H",
-            core.alu_result_mem, core.load_data, core.lsu_done, core.lsu.state, core.b_rdata, core.mem_wstrb_mem);
-        $display("MEM: b_addr=%h b_wstrb=%h b_wdata=%h mem[0x40]=%h",
-            b_addr, b_wstrb, b_wdata, mem.mem[8'h40]);
+        $display("LW IN MEM: alu_result_mem=%h load_data=%h lsu_done=%b lsu.state=%0d mem.b_addr=%h, lsu.b_rdata=%h lsu.mem_wstrb=%H",
+            core.alu_result_mem, core.load_data, core.lsu_done, core.lsu.state, mem.b_addr, mem.b_rdata, core.mem_wstrb_mem);
+        $display("MEM: b_valid=%b, b_addr=%h b_wstrb=%h b_wdata=%h mem[0x40]=%h",
+            b_valid,core.lsu.b_addr, b_wstrb, b_wdata, mem.mem[8'h40]);
           end
             if (core.mem_wen_mem)
         $display("SW IN MEM: alu_result_mem=%h rs2_mem=%h b_addr=%h b_wdata=%h b_wstrb=%h lsu_done=%b",
@@ -188,6 +188,18 @@ module core_tb;
   end
 
   // -------------------------
+  // VCD Dumping
+  // -------------------------
+  wire [7:0] mem_debug_40 = core_tb.mem.mem[8'h40];
+  initial begin
+    $dumpfile("core_tb.vcd");
+    $dumpvars(0, core_tb);
+    $dumpvars(0, core_tb.core.fetch);
+    $dumpvars(0, mem_debug_40);
+    $dumpflush();
+  end
+
+  // -------------------------
   // Simulation Control
   // -------------------------
   initial begin
@@ -212,6 +224,7 @@ module core_tb;
     dump_registers();
     dump_memory(dump_start, dump_len);
 
+    $dumpflush();
     $finish;
   end
 

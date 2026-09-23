@@ -1,3 +1,299 @@
+// =============================================================================
+// dual_port_byte_mem (instant - zero latency)
+// =============================================================================
+// Byte-addressed, dual-port memory model for RTL simulation.
+//
+// Intended use:
+//   - CPU bring-up and hazard validation (NOT meant for synthesis).
+//   - Zero-latency combinational reads on both ports.
+//   - Drop-in replacement for the pipelined dual_port_byte_mem.
+//   - RD_LATENCY and WRITE_FIRST parameters kept for compatibility but ignored.
+//
+// Addressing / Endianness:
+//   - Byte addressed: address selects a byte in `mem[]`.
+//   - 32-bit reads return 4 consecutive bytes in little-endian order.
+//
+// Notes:
+//   - a_rvalid and b_rvalid are always 1.
+//   - Writes are still synchronous (posedge clk).
+//   - Use $readmemh to load programs: $readmemh("prog.hex", dut.mem);
+// =============================================================================
+
+module dual_port_byte_mem #(
+  parameter integer MEM_BYTES   = 64 * 1024,
+  parameter integer ADDR_WIDTH  = $clog2(MEM_BYTES),
+  parameter integer RD_LATENCY  = 1,  // ignored, kept for compatibility
+  parameter integer WRITE_FIRST = 0   // ignored, kept for compatibility
+) (
+  input  logic                  clk,
+
+  // Port A
+  input  logic                  a_valid,
+  input  logic [ADDR_WIDTH-1:0] a_addr,
+  input  logic [31:0]           a_wdata,
+  input  logic [3:0]            a_wstrb,
+  output logic [31:0]           a_rdata,
+  output logic                  a_rvalid,
+
+  // Port B
+  input  logic                  b_valid,
+  input  logic [ADDR_WIDTH-1:0] b_addr,
+  input  logic [31:0]           b_wdata,
+  input  logic [3:0]            b_wstrb,
+  output logic [31:0]           b_rdata,
+  output logic                  b_rvalid
+);
+
+  byte mem [0:MEM_BYTES-1];
+
+  function automatic [7:0] rd8(input integer unsigned addr);
+    if (addr < MEM_BYTES) rd8 = mem[addr];
+    else                  rd8 = 8'h00;
+  endfunction
+
+  // Port A — combinational read, always valid
+  assign a_rdata  = {rd8(a_addr+3), rd8(a_addr+2), rd8(a_addr+1), rd8(a_addr+0)};
+  assign a_rvalid = 1'b1;
+
+  // Port B — combinational read, always valid
+  assign b_rdata  = {rd8(b_addr+3), rd8(b_addr+2), rd8(b_addr+1), rd8(b_addr+0)};
+  assign b_rvalid = 1'b1;
+
+  // Synchronous writes
+  always_ff @(posedge clk) begin
+    if (a_valid) begin
+      if (a_wstrb[0] && (a_addr+0 < MEM_BYTES)) mem[a_addr+0] <= a_wdata[7:0];
+      if (a_wstrb[1] && (a_addr+1 < MEM_BYTES)) mem[a_addr+1] <= a_wdata[15:8];
+      if (a_wstrb[2] && (a_addr+2 < MEM_BYTES)) mem[a_addr+2] <= a_wdata[23:16];
+      if (a_wstrb[3] && (a_addr+3 < MEM_BYTES)) mem[a_addr+3] <= a_wdata[31:24];
+    end
+    if (b_valid) begin
+      if (b_wstrb[0] && (b_addr+0 < MEM_BYTES)) mem[b_addr+0] <= b_wdata[7:0];
+      if (b_wstrb[1] && (b_addr+1 < MEM_BYTES)) mem[b_addr+1] <= b_wdata[15:8];
+      if (b_wstrb[2] && (b_addr+2 < MEM_BYTES)) mem[b_addr+2] <= b_wdata[23:16];
+      if (b_wstrb[3] && (b_addr+3 < MEM_BYTES)) mem[b_addr+3] <= b_wdata[31:24];
+    end
+  end
+
+endmodule
+
+
+// =============================================================================
+// dual_port_byte_mem
+// =============================================================================
+// Byte-addressed, dual-port memory model for RTL simulation.
+//
+// Intended use:
+//   - CPU bring-up and cycle-level simulation (NOT meant for synthesis).
+//   - Works well as a stand-in for an I$ (Port A) and D$ / LSU (Port B).
+//   - Supports loading program images via $readmemh into the public `mem[]` array.
+//
+// Addressing / Endianness:
+//   - Byte addressed: address selects a byte in `mem[]`.
+//   - 32-bit reads return 4 consecutive bytes in little-endian order:
+//       rdata[7:0]   = mem[addr+0]
+//       rdata[15:8]  = mem[addr+1]
+//       rdata[23:16] = mem[addr+2]
+//       rdata[31:24] = mem[addr+3]
+//   - This matches RV32 little-endian instruction/data layout.
+//
+// Ports / Protocol (both ports identical):
+//   Inputs:
+//     *valid : when 1, a request is accepted on the rising edge of clk.
+//     *addr  : byte address for the request.
+//     *wdata : write data (used when *wstrb != 0).
+//     *wstrb : write strobe per byte lane (little-endian lanes):
+//              wstrb[0] -> writes mem[addr+0] with wdata[7:0]
+//              wstrb[1] -> writes mem[addr+1] with wdata[15:8]
+//              wstrb[2] -> writes mem[addr+2] with wdata[23:16]
+//              wstrb[3] -> writes mem[addr+3] with wdata[31:24]
+//              wstrb == 0 implies a read request.
+//   Outputs:
+//     *rvalid: asserted when *rdata corresponds to a previous accepted request.
+//     *rdata : 32-bit read data corresponding to the address captured with the
+//              request that produced this response.
+//
+// Latency:
+//   - RD_LATENCY parameter controls the internal request pipeline depth.
+//   - This model pipelines requests and produces responses in order.
+//   - Effective request->response latency depends on implementation details;
+//     users should rely on *rvalid rather than assuming a fixed cycle count.
+//
+// Ordering / Concurrency:
+//   - Each port is independent; both ports can accept one request per cycle.
+//   - Responses for a given port are returned in the same order requests were
+//     accepted on that port.
+//   - No backpressure/ready signal is modeled (always "accepts" when *valid=1).
+//
+// Simultaneous read/write to same address:
+//   - WRITE_FIRST parameter (best-effort model):
+//       0: read-first (default) behavior in ambiguous same-cycle cases
+//       1: write-first behavior for the special case RD_LATENCY==1 and same-port
+//          read+write overlap (limited corner-case support; see code).
+//
+// Bounds behavior:
+//   - Byte reads out of range return 0.
+//   - Writes out of range are ignored (guarded by address checks).
+//
+// Notes:
+//   - Because `mem` is declared as a public byte array, a testbench can do:
+//       $readmemh("program.hex", dut.mem);
+//   - If you later add caches or a bus, keep using *rvalid to align responses.
+// =============================================================================
+module dual_port_byte_mem #(
+  parameter integer MEM_BYTES    = 64 * 1024,
+  parameter integer ADDR_WIDTH   = $clog2(MEM_BYTES),
+
+  // Read latency in cycles (>=1 recommended for CPU simulation)
+  parameter integer RD_LATENCY   = 1,
+
+  // If 1: model "write-first" when read+write same address same cycle on same port
+  // If 0: model "read-first" (read old data). This mainly matters in corner cases.
+  parameter integer WRITE_FIRST  = 0
+) (
+  input  logic                  clk,
+
+  // Port A
+  input  logic                  a_valid,
+  input  logic [ADDR_WIDTH-1:0]  a_addr,
+  input  logic [31:0]           a_wdata,
+  input  logic [3:0]            a_wstrb,
+  output logic [31:0]           a_rdata,
+  output logic                  a_rvalid,   // NEW: indicates rdata corresponds to a past request
+
+  // Port B
+  input  logic                  b_valid,
+  input  logic [ADDR_WIDTH-1:0]  b_addr,
+  input  logic [31:0]           b_wdata,
+  input  logic [3:0]            b_wstrb,
+  output logic [31:0]           b_rdata,
+  output logic                  b_rvalid
+);
+
+  // Byte-addressed storage
+  byte mem [0:MEM_BYTES-1];
+
+  function automatic [7:0] rd8(input integer unsigned addr);
+    if (addr < MEM_BYTES) rd8 = mem[addr];
+    else                  rd8 = 8'h00;
+  endfunction
+
+  // -------------------------
+  // Port A pipelines
+  // -------------------------
+  logic [ADDR_WIDTH-1:0] a_addr_pipe [0:RD_LATENCY-1];
+  logic                  a_v_pipe    [0:RD_LATENCY-1];
+
+  // -------------------------
+  // Port B pipelines
+  // -------------------------
+  logic [ADDR_WIDTH-1:0] b_addr_pipe [0:RD_LATENCY-1];
+  logic                  b_v_pipe    [0:RD_LATENCY-1];
+
+  integer i;
+
+  // Optional init (prevents Xs on outputs)
+  initial begin
+    a_rdata  = 32'h0;
+    b_rdata  = 32'h0;
+    a_rvalid = 1'b0;
+    b_rvalid = 1'b0;
+
+    // Init pipelines to 0
+    for (i = 0; i < RD_LATENCY; i = i + 1) begin
+      a_addr_pipe[i] = '0; a_v_pipe[i] = 1'b0;
+      b_addr_pipe[i] = '0; b_v_pipe[i] = 1'b0;
+    end
+  end
+
+  // -------------------------
+  // Writes (posedge)
+  // -------------------------
+  always_ff @(posedge clk) begin
+    if (a_valid) begin
+      if (a_wstrb[0] && (a_addr + 0 < MEM_BYTES)) mem[a_addr + 0] <= a_wdata[7:0];
+      if (a_wstrb[1] && (a_addr + 1 < MEM_BYTES)) mem[a_addr + 1] <= a_wdata[15:8];
+      if (a_wstrb[2] && (a_addr + 2 < MEM_BYTES)) mem[a_addr + 2] <= a_wdata[23:16];
+      if (a_wstrb[3] && (a_addr + 3 < MEM_BYTES)) mem[a_addr + 3] <= a_wdata[31:24];
+    end
+
+    if (b_valid) begin
+      if (b_wstrb[0] && (b_addr + 0 < MEM_BYTES)) mem[b_addr + 0] <= b_wdata[7:0];
+      if (b_wstrb[1] && (b_addr + 1 < MEM_BYTES)) mem[b_addr + 1] <= b_wdata[15:8];
+      if (b_wstrb[2] && (b_addr + 2 < MEM_BYTES)) mem[b_addr + 2] <= b_wdata[23:16];
+      if (b_wstrb[3] && (b_addr + 3 < MEM_BYTES)) mem[b_addr + 3] <= b_wdata[31:24];
+    end
+  end
+
+  // -------------------------
+  // Read request pipelines (posedge)
+  // -------------------------
+  always_ff @(posedge clk) begin
+    // stage 0 captures incoming request
+    a_addr_pipe[0] <= a_addr;
+    a_v_pipe[0]    <= a_valid;
+
+    b_addr_pipe[0] <= b_addr;
+    b_v_pipe[0]    <= b_valid;
+
+    // shift down the pipeline
+    for (i = 1; i < RD_LATENCY; i = i + 1) begin
+      a_addr_pipe[i] <= a_addr_pipe[i-1];
+      a_v_pipe[i]    <= a_v_pipe[i-1];
+
+      b_addr_pipe[i] <= b_addr_pipe[i-1];
+      b_v_pipe[i]    <= b_v_pipe[i-1];
+    end
+  end
+
+  // -------------------------
+  // Read response generation (posedge)
+  // Data corresponds to addr_pipe[RD_LATENCY-1]
+  // -------------------------
+  always_ff @(posedge clk) begin : RESP
+    logic [ADDR_WIDTH-1:0] aa;
+    logic [ADDR_WIDTH-1:0] bb;
+    logic [31:0] a_word;
+    logic [31:0] b_word;
+
+    aa = a_addr_pipe[RD_LATENCY-1];
+    bb = b_addr_pipe[RD_LATENCY-1];
+
+    // Base read data (little-endian assembly)
+    a_word = { rd8(aa + 3), rd8(aa + 2), rd8(aa + 1), rd8(aa + 0) };
+    b_word = { rd8(bb + 3), rd8(bb + 2), rd8(bb + 1), rd8(bb + 0) };
+
+    // Optional same-port write-first modeling (only for same cycle as request stage 0)
+    // This is a corner-case model; you can ignore if you don't care.
+    if (WRITE_FIRST) begin
+      // If the *request being returned now* was issued RD_LATENCY cycles ago,
+      // we do NOT track the historical write strobes for that request here.
+      // So WRITE_FIRST is only meaningful when RD_LATENCY==1.
+      if (RD_LATENCY == 1) begin
+        if (a_valid && (a_wstrb != 0) && (a_addr == aa)) begin
+          if (a_wstrb[0]) a_word[7:0]   = a_wdata[7:0];
+          if (a_wstrb[1]) a_word[15:8]  = a_wdata[15:8];
+          if (a_wstrb[2]) a_word[23:16] = a_wdata[23:16];
+          if (a_wstrb[3]) a_word[31:24] = a_wdata[31:24];
+        end
+        if (b_valid && (b_wstrb != 0) && (b_addr == bb)) begin
+          if (b_wstrb[0]) b_word[7:0]   = b_wdata[7:0];
+          if (b_wstrb[1]) b_word[15:8]  = b_wdata[15:8];
+          if (b_wstrb[2]) b_word[23:16] = b_wdata[23:16];
+          if (b_wstrb[3]) b_word[31:24] = b_wdata[31:24];
+        end
+      end
+    end
+
+    a_rdata  <= a_word;
+    b_rdata  <= b_word;
+    a_rvalid <= a_v_pipe[RD_LATENCY-1];
+    b_rvalid <= b_v_pipe[RD_LATENCY-1];
+  end
+
+endmodule
+
+
 //==============================================================================
 // Package: mrv32_pkg v1.0
 //------------------------------------------------------------------------------
@@ -84,6 +380,106 @@ package mrv32_pkg;
   localparam int unsigned REGADDR = 5;
 
 endpackage : mrv32_pkg
+
+
+//==============================================================================
+// Module: mrv32_alu v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   RV32I arithmetic logic unit.
+//
+// Supported Operations:
+//   - ADD / SUB
+//   - AND / OR / XOR
+//   - SLT / SLTU
+//   - Shift left/right (logical and arithmetic)
+//
+// Notes:
+//   Operation selected via alu_op control from decode stage.
+//   ALU result is used for arithmetic, branch comparison, and address
+//   generation.
+//
+// Author: Martim Bento
+// Date  : 01/03/2026
+//==============================================================================
+
+module mrv32_alu (
+    input  logic [31:0] op1,
+    input  logic [31:0] op2,
+    input  logic [3:0]  aluop,
+    output logic [31:0] result
+);
+  import mrv32_pkg::*;
+
+  wire [4:0] shamt = op2[4:0];  // extract shift amount outside always block
+
+  always_comb begin
+    case (aluop)
+      ALU_ADD: result = op1 + op2;
+      ALU_SUB: result = op1 - op2;
+      ALU_AND: result = op1 & op2;
+      ALU_OR:  result = op1 | op2;
+      ALU_XOR: result = op1 ^ op2;
+      ALU_SLL:  result = op1 << shamt;
+      ALU_SRL:  result = op1 >> shamt;
+      ALU_SRA:  result = 32'($signed(op1) >>> shamt);
+      ALU_SLT:  result = {31'd0, $signed(op1) < $signed(op2)};
+      ALU_SLTU: result = {31'd0, op1 < op2};
+      default: result = 32'd0; // Default case for unsupported operations
+    endcase
+  end
+
+endmodule
+
+
+//==============================================================================
+// Module: mrv32_bru v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   Branch resolution unit.
+//
+// Function:
+//   - Evaluates branch conditions using ALU result flags
+//   - Generates take_branch signal
+//
+// Supported Branches:
+//   - BEQ, BNE
+//   - BLT, BGE
+//   - BLTU, BGEU
+//
+//   - JAL, JALR (Unconditional Branches)
+//
+// Notes:
+//   Branch resolution currently occurs in MEM stage.
+//
+// Author: Martim Bento
+// Date  : 01/03/2026
+//==============================================================================
+
+module mrv32_bru (
+
+    input logic [1:0] br_sel,
+    input logic [31:0] alu_result,
+    output logic take_branch
+
+);
+
+    logic is_Zero;
+    assign is_Zero = alu_result == 32'd0;
+
+    always_comb begin
+        case (br_sel)
+            2'b00: take_branch = 1'b0; // not a branch
+            2'b01: take_branch = 1'b1; // unconditional jump (JAL/JALR)
+            2'b10: take_branch = is_Zero ? 1'b1 : 1'b0; // branch (BEQ, BGE, BGEU)
+            2'b11: take_branch = is_Zero ? 1'b0 : 1'b1; // branch (BNE, BLT, BLTU)
+            default: take_branch = 1'b0;
+        endcase
+    end
+
+endmodule
+
+
 //==============================================================================
 // Module: mrv32_fetch v1.1
 //------------------------------------------------------------------------------
@@ -170,56 +566,43 @@ module mrv32_fetch (
     end else if (!stall) begin
       instr       <= a_rvalid ? a_rdata : NOP;
       pc          <= pc_fetch;
-      instr_valid <= a_rvalid;
+      instr_valid <= a_rvalid && !take_branch;
     end
   end
 
-endmodule//==============================================================================
-// Module: mrv32_imm_gen v1.0
-//------------------------------------------------------------------------------
-// Description:
-//   Immediate value generator for RV32I instructions.
-//
-// Supported Formats:
-//   - I-type
-//   - S-type
-//   - B-type
-//   - U-type
-//   - J-type
-//
-// Notes:
-//   Immediate format selected via imm_sel control from decode stage.
-//   Outputs properly sign-extended 32-bit immediate.
-//
-// Author: Martim Bento
-// Date  : 01/03/2026
-//==============================================================================
+endmodule
 
-module mrv32_imm_gen (
-    input  logic [31:0] instr,
-    input  logic [2:0]  imm_sel,
-    output logic [31:0] imm
+
+/** Hazard Detection Unit **/
+
+module mrv32_hzdu (
+    input logic reg_wen_ex,
+    input logic [4:0] rd_ex, // alu_result_ex
+    input logic reg_wen_mem,
+    input logic [4:0] rd_mem, // alu_result_mem
+    input logic [4:0] rs1_id,
+    input logic [4:0] rs2_id,
+    input logic rs2_id_used,
+    input logic mem_ren_ex,
+    output logic fwd_rs1_ex,
+    output logic fwd_rs2_ex,
+    output logic fwd_rs1_mem,
+    output logic fwd_rs2_mem,
+    output logic load_stall
 );
-  import mrv32_pkg::*;
 
-  // Precompute all immediates (pure wiring)
-  wire [31:0] imm_i = {{20{instr[31]}}, instr[31:20]};
-  wire [31:0] imm_s = {{20{instr[31]}}, instr[31:25], instr[11:7]};
-  wire [31:0] imm_b = {{19{instr[31]}}, instr[31], instr[7],
-                       instr[30:25], instr[11:8], 1'b0};
-  wire [31:0] imm_u = {instr[31:12], 12'b0};
-  wire [31:0] imm_j = {{11{instr[31]}}, instr[31], instr[19:12],
-                       instr[20], instr[30:21], 1'b0};
+assign fwd_rs1_ex = (rd_ex == rs1_id) & reg_wen_ex & (rd_ex != 0);
+assign fwd_rs2_ex = (rd_ex == rs2_id) & reg_wen_ex & (rd_ex != 0) & rs2_id_used;
 
-  // Select immediate
-  assign imm =
-      (imm_sel == IMM_I) ? imm_i :
-      (imm_sel == IMM_S) ? imm_s :
-      (imm_sel == IMM_B) ? imm_b :
-      (imm_sel == IMM_U) ? imm_u :
-      (imm_sel == IMM_J) ? imm_j :
-                           32'd0;
-endmodule//==============================================================================
+assign fwd_rs1_mem = (rd_mem == rs1_id) & reg_wen_mem & (rd_mem != 0);
+assign fwd_rs2_mem = (rd_mem == rs2_id) & reg_wen_mem & (rd_mem != 0) & rs2_id_used;
+
+assign load_stall = mem_ren_ex & ((rd_ex == rs1_id) | ((rd_ex == rs2_id) & rs2_id_used)) & (rd_ex != 0);
+
+endmodule
+
+
+//==============================================================================
 // Module: mrv32_decode v1.0
 //------------------------------------------------------------------------------
 // Description:
@@ -451,99 +834,58 @@ module mrv32_decode(
     .imm(imm)
   );
 
-endmodule//==============================================================================
-// Module: mrv32_alu v1.0
+endmodule
+
+
+//==============================================================================
+// Module: mrv32_imm_gen v1.0
 //------------------------------------------------------------------------------
 // Description:
-//   RV32I arithmetic logic unit.
+//   Immediate value generator for RV32I instructions.
 //
-// Supported Operations:
-//   - ADD / SUB
-//   - AND / OR / XOR
-//   - SLT / SLTU
-//   - Shift left/right (logical and arithmetic)
+// Supported Formats:
+//   - I-type
+//   - S-type
+//   - B-type
+//   - U-type
+//   - J-type
 //
 // Notes:
-//   Operation selected via alu_op control from decode stage.
-//   ALU result is used for arithmetic, branch comparison, and address
-//   generation.
+//   Immediate format selected via imm_sel control from decode stage.
+//   Outputs properly sign-extended 32-bit immediate.
 //
 // Author: Martim Bento
 // Date  : 01/03/2026
 //==============================================================================
 
-module mrv32_alu (
-    input  logic [31:0] op1,
-    input  logic [31:0] op2,
-    input  logic [3:0]  aluop,
-    output logic [31:0] result
+module mrv32_imm_gen (
+    input  logic [31:0] instr,
+    input  logic [2:0]  imm_sel,
+    output logic [31:0] imm
 );
   import mrv32_pkg::*;
 
-  wire [4:0] shamt = op2[4:0];  // extract shift amount outside always block
+  // Precompute all immediates (pure wiring)
+  wire [31:0] imm_i = {{20{instr[31]}}, instr[31:20]};
+  wire [31:0] imm_s = {{20{instr[31]}}, instr[31:25], instr[11:7]};
+  wire [31:0] imm_b = {{19{instr[31]}}, instr[31], instr[7],
+                       instr[30:25], instr[11:8], 1'b0};
+  wire [31:0] imm_u = {instr[31:12], 12'b0};
+  wire [31:0] imm_j = {{11{instr[31]}}, instr[31], instr[19:12],
+                       instr[20], instr[30:21], 1'b0};
 
-  always_comb begin
-    case (aluop)
-      ALU_ADD: result = op1 + op2;
-      ALU_SUB: result = op1 - op2;
-      ALU_AND: result = op1 & op2;
-      ALU_OR:  result = op1 | op2;
-      ALU_XOR: result = op1 ^ op2;
-      ALU_SLL:  result = op1 << shamt;
-      ALU_SRL:  result = op1 >> shamt;
-      ALU_SRA:  result = 32'($signed(op1) >>> shamt);
-      ALU_SLT:  result = {31'd0, $signed(op1) < $signed(op2)};
-      ALU_SLTU: result = {31'd0, op1 < op2};
-      default: result = 32'd0; // Default case for unsupported operations
-    endcase
-  end
+  // Select immediate
+  assign imm =
+      (imm_sel == IMM_I) ? imm_i :
+      (imm_sel == IMM_S) ? imm_s :
+      (imm_sel == IMM_B) ? imm_b :
+      (imm_sel == IMM_U) ? imm_u :
+      (imm_sel == IMM_J) ? imm_j :
+                           32'd0;
+endmodule
 
-endmodule//==============================================================================
-// Module: mrv32_bru v1.0
-//------------------------------------------------------------------------------
-// Description:
-//   Branch resolution unit.
-//
-// Function:
-//   - Evaluates branch conditions using ALU result flags
-//   - Generates take_branch signal
-//
-// Supported Branches:
-//   - BEQ, BNE
-//   - BLT, BGE
-//   - BLTU, BGEU
-//
-//   - JAL, JALR (Unconditional Branches)
-//
-// Notes:
-//   Branch resolution currently occurs in MEM stage.
-//
-// Author: Martim Bento
-// Date  : 01/03/2026
+
 //==============================================================================
-
-module mrv32_bru (
-
-    input logic [1:0] br_sel,
-    input logic [31:0] alu_result,
-    output logic take_branch
-
-);
-
-    logic is_Zero;
-    assign is_Zero = alu_result == 32'd0;
-
-    always_comb begin
-        case (br_sel)
-            2'b00: take_branch = 1'b0; // not a branch
-            2'b01: take_branch = 1'b1; // unconditional jump (JAL/JALR)
-            2'b10: take_branch = is_Zero ? 1'b1 : 1'b0; // branch (BEQ, BGE, BGEU)
-            2'b11: take_branch = is_Zero ? 1'b0 : 1'b1; // branch (BNE, BLT, BLTU)
-            default: take_branch = 1'b0;
-        endcase
-    end
-
-endmodule//==============================================================================
 // Module: mrv32_lsu v1.0
 //------------------------------------------------------------------------------
 // Description:
@@ -762,7 +1104,10 @@ module mrv32_lsu (
     end
   end
 
-endmodule//==============================================================================
+endmodule
+
+
+//==============================================================================
 // Module: mrv32_periph_decoder v1.0
 //------------------------------------------------------------------------------
 // Description:
@@ -800,7 +1145,65 @@ assign periph_valid = mem_wen & (eff_addr >= PERIPH_BASE && eff_addr < PERIPH_EN
 assign periph_addr = eff_addr;
 assign periph_wdata = store_data;
 
-endmodule//==============================================================================
+endmodule
+
+
+//==============================================================================
+// Module: mrv32_regfile v1.0
+//------------------------------------------------------------------------------
+// Description:
+//   32 x 32-bit register file.
+//
+// Features:
+//   - 2 read ports
+//   - 1 write port
+//   - x0 hardwired to zero
+//
+// Notes:
+//   Writes occur in WB stage.
+//   Designed to support forwarding in future revisions.
+//
+// Author: Martim Bento
+// Date  : 01/03/2026
+//==============================================================================
+
+module mrv32_regfile (
+
+    input logic clk,
+    input logic rst_n,
+    input logic [4:0] rs1_addr,
+    input logic [4:0] rs2_addr,
+    input logic [4:0] rd_addr,
+    input logic [31:0] rd_data,
+    input logic reg_wen,
+    output logic [31:0] rs1_data,
+    output logic [31:0] rs2_data
+);
+
+logic [31:0] registers [0: 30]; // 31 real registers, x1 - x31; x0 is hardwired to 0
+
+// Read Logic
+always_comb begin
+    rs1_data = (rs1_addr == 5'b00000) ? 32'b0 : registers[rs1_addr - 1];
+    rs2_data = (rs2_addr == 5'b00000) ? 32'b0 : registers[rs2_addr - 1];
+end
+
+// Write Logic
+always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+        for (int i = 0; i < 31; i++) begin
+            registers[i] <= 32'b0;
+        end
+    end else if (reg_wen && rd_addr != 5'b00000) begin
+        registers[rd_addr - 1] <= rd_data;
+    end
+end
+
+
+endmodule
+
+
+//==============================================================================
 // Module: mrv32_wb v1.1
 //------------------------------------------------------------------------------
 // Description:
@@ -873,85 +1276,10 @@ module mrv32_wb (
     end
   end
 
-endmodule/** Hazard Detection Unit **/
+endmodule
 
-module mrv32_hzdu (
-    input logic reg_wen_ex,
-    input logic [4:0] rd_ex, // alu_result_ex
-    input logic reg_wen_mem,
-    input logic [4:0] rd_mem, // alu_result_mem
-    input logic [4:0] rs1_id,
-    input logic [4:0] rs2_id,
-    input logic rs2_id_used,
-    input logic mem_ren_ex,
-    output logic fwd_rs1_ex,
-    output logic fwd_rs2_ex,
-    output logic fwd_rs1_mem,
-    output logic fwd_rs2_mem,
-    output logic load_stall
-);
 
-assign fwd_rs1_ex = (rd_ex == rs1_id) & reg_wen_ex & (rd_ex != 0);
-assign fwd_rs2_ex = (rd_ex == rs2_id) & reg_wen_ex & (rd_ex != 0) & rs2_id_used;
-
-assign fwd_rs1_mem = (rd_mem == rs1_id) & reg_wen_mem & (rd_mem != 0);
-assign fwd_rs2_mem = (rd_mem == rs2_id) & reg_wen_mem & (rd_mem != 0) & rs2_id_used;
-
-assign load_stall = mem_ren_ex & ((rd_ex == rs1_id) | ((rd_ex == rs2_id) & rs2_id_used)) & (rd_ex != 0);
-
-endmodule//==============================================================================
-// Module: mrv32_regfile v1.0
-//------------------------------------------------------------------------------
-// Description:
-//   32 x 32-bit register file.
-//
-// Features:
-//   - 2 read ports
-//   - 1 write port
-//   - x0 hardwired to zero
-//
-// Notes:
-//   Writes occur in WB stage.
-//   Designed to support forwarding in future revisions.
-//
-// Author: Martim Bento
-// Date  : 01/03/2026
 //==============================================================================
-
-module mrv32_regfile (
-
-    input logic clk,
-    input logic rst_n,
-    input logic [4:0] rs1_addr,
-    input logic [4:0] rs2_addr,
-    input logic [4:0] rd_addr,
-    input logic [31:0] rd_data,
-    input logic reg_wen,
-    output logic [31:0] rs1_data,
-    output logic [31:0] rs2_data
-);
-
-logic [31:0] registers [0: 30]; // 31 real registers, x1 - x31; x0 is hardwired to 0
-
-// Read Logic
-always_comb begin
-    rs1_data = (rs1_addr == 5'b00000) ? 32'b0 : registers[rs1_addr - 1];
-    rs2_data = (rs2_addr == 5'b00000) ? 32'b0 : registers[rs2_addr - 1];
-end
-
-// Write Logic
-always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-        for (int i = 0; i < 31; i++) begin
-            registers[i] <= 32'b0;
-        end
-    end else if (reg_wen && rd_addr != 5'b00000) begin
-        registers[rd_addr - 1] <= rd_data;
-    end
-end
-
-
-endmodule//==============================================================================
 // Module: mrv32_core v1.1
 //------------------------------------------------------------------------------
 // Description:
@@ -1221,7 +1549,7 @@ mrv32_wb wb(.wb_valid(instr_valid_wb), .reg_wen_in(reg_wen_wb), .mem_ren_in(mem_
             .pc_in(pc_wb), .instr_accept(instr_accept), .rf_wen(rf_wen), .rf_waddr(rf_waddr), .rf_wdata(rf_wdata));
 
 // An illegal instruction reached WB stage!
-assign illegal_instr = illegal_wb;
+assign illegal_instr = illegal_wb & instr_valid_wb;
 
 logic fwd_rs1_ex, fwd_rs2_ex, fwd_rs1_mem, fwd_rs2_mem, load_stall;
 
@@ -1265,3 +1593,42 @@ assign rs2_fwd = fwd_rs2_ex  ? fwd_val_ex  :
                                rs2_data;
 
 endmodule;
+
+
+module sim_peripherals (
+    input  logic        clk,
+    input  logic        periph_valid,
+    input  logic [31:0] periph_addr,
+    input  logic [31:0] periph_wdata,
+    output logic        tohost_fired
+);
+
+  localparam logic [31:0] UART_ADDR   = 32'h10000000;
+  localparam logic [31:0] TOHOST_ADDR = 32'h10000010;
+
+  initial tohost_fired = 1'b0;
+
+  always @(posedge clk) begin
+    if (periph_valid) begin
+        //$display("periph @ %h called with data: %h", periph_addr, periph_wdata);
+      case (periph_addr)
+
+        UART_ADDR: begin
+          $write("%c", periph_wdata[7:0]);
+        end
+
+        TOHOST_ADDR: begin
+            $display("\n[TOHOST] exit code: %0d", periph_wdata);
+            tohost_fired <= 1'b1;
+        end
+
+        default: begin
+          $display("[PERIPH] unhandled write: addr=0x%08x data=0x%08x",
+                   periph_addr, periph_wdata);
+        end
+
+      endcase
+    end
+  end
+
+endmodule

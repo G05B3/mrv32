@@ -84,7 +84,7 @@ module mrv32_fetch (
     end else if (!stall) begin
       instr       <= a_rvalid ? a_rdata : NOP;
       pc          <= pc_fetch;
-      instr_valid <= a_rvalid;
+      instr_valid <= a_rvalid && !take_branch;
     end
   end
 

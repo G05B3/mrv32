@@ -82,7 +82,7 @@ CORE_SRCS="$PKG $MIDDLE $CORE"
 #../RTL/mem_dual_port.sv \  <--- add this instead of instant_mem.sv in the final version
 iverilog -g2012 -o sim \
   $CORE_SRCS \
-  ../RTL/instant_mem.sv \
+  ../RTL/mem_dual_port.sv \
   ../RTL/peripherals.sv \
   core_tb.sv \
   || exit 0

@@ -73,8 +73,10 @@ mrv32_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_vali
 logic [64:0] reg_if_id;
 // Stage Register between IF and ID
 always_ff @(posedge clk) begin
-    if (!rst_n || take_branch || load_stall)
+    if (!rst_n || take_branch)
         reg_if_id <= 0;
+    else if (load_stall)
+        reg_if_id <= reg_if_id; // hold the value
     else if (!stall)
         reg_if_id <= {instr_if, pc_if, instr_valid_fetch};
 end
@@ -118,7 +120,11 @@ logic [99:0] reg_id_ex;
 always_ff @(posedge clk) begin
     if (!rst_n || take_branch)
         reg_id_ex <= 0;
-    else if (!stall)
+    else if (stall)
+        reg_id_ex <= reg_id_ex; // hold the value
+    else if (load_stall)
+        reg_id_ex <= 0;
+    else
         reg_id_ex <= {unsupported & iv_if_id, br_sel, is_jalr, is_auipc, pc_id, instr_valid_decode,
         load_unsigned, rs1_addr, rs2_addr, rd_addr, aluop, alusrc, mem_ren, mem_wen, mem_wstrb, reg_wen, is_lui, imm,
         mem_valid};
