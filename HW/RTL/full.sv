@@ -78,218 +78,110 @@ module dual_port_byte_mem #(
 endmodule
 
 
-// =============================================================================
-// dual_port_byte_mem
-// =============================================================================
-// Byte-addressed, dual-port memory model for RTL simulation.
-//
-// Intended use:
-//   - CPU bring-up and cycle-level simulation (NOT meant for synthesis).
-//   - Works well as a stand-in for an I$ (Port A) and D$ / LSU (Port B).
-//   - Supports loading program images via $readmemh into the public `mem[]` array.
-//
-// Addressing / Endianness:
-//   - Byte addressed: address selects a byte in `mem[]`.
-//   - 32-bit reads return 4 consecutive bytes in little-endian order:
-//       rdata[7:0]   = mem[addr+0]
-//       rdata[15:8]  = mem[addr+1]
-//       rdata[23:16] = mem[addr+2]
-//       rdata[31:24] = mem[addr+3]
-//   - This matches RV32 little-endian instruction/data layout.
-//
-// Ports / Protocol (both ports identical):
-//   Inputs:
-//     *valid : when 1, a request is accepted on the rising edge of clk.
-//     *addr  : byte address for the request.
-//     *wdata : write data (used when *wstrb != 0).
-//     *wstrb : write strobe per byte lane (little-endian lanes):
-//              wstrb[0] -> writes mem[addr+0] with wdata[7:0]
-//              wstrb[1] -> writes mem[addr+1] with wdata[15:8]
-//              wstrb[2] -> writes mem[addr+2] with wdata[23:16]
-//              wstrb[3] -> writes mem[addr+3] with wdata[31:24]
-//              wstrb == 0 implies a read request.
-//   Outputs:
-//     *rvalid: asserted when *rdata corresponds to a previous accepted request.
-//     *rdata : 32-bit read data corresponding to the address captured with the
-//              request that produced this response.
-//
-// Latency:
-//   - RD_LATENCY parameter controls the internal request pipeline depth.
-//   - This model pipelines requests and produces responses in order.
-//   - Effective request->response latency depends on implementation details;
-//     users should rely on *rvalid rather than assuming a fixed cycle count.
-//
-// Ordering / Concurrency:
-//   - Each port is independent; both ports can accept one request per cycle.
-//   - Responses for a given port are returned in the same order requests were
-//     accepted on that port.
-//   - No backpressure/ready signal is modeled (always "accepts" when *valid=1).
-//
-// Simultaneous read/write to same address:
-//   - WRITE_FIRST parameter (best-effort model):
-//       0: read-first (default) behavior in ambiguous same-cycle cases
-//       1: write-first behavior for the special case RD_LATENCY==1 and same-port
-//          read+write overlap (limited corner-case support; see code).
-//
-// Bounds behavior:
-//   - Byte reads out of range return 0.
-//   - Writes out of range are ignored (guarded by address checks).
-//
-// Notes:
-//   - Because `mem` is declared as a public byte array, a testbench can do:
-//       $readmemh("program.hex", dut.mem);
-//   - If you later add caches or a bus, keep using *rvalid to align responses.
-// =============================================================================
+import mrv32_pkg::*;
+
 module dual_port_byte_mem #(
-  parameter integer MEM_BYTES    = 64 * 1024,
-  parameter integer ADDR_WIDTH   = $clog2(MEM_BYTES),
-
-  // Read latency in cycles (>=1 recommended for CPU simulation)
-  parameter integer RD_LATENCY   = 1,
-
-  // If 1: model "write-first" when read+write same address same cycle on same port
-  // If 0: model "read-first" (read old data). This mainly matters in corner cases.
-  parameter integer WRITE_FIRST  = 0
+    parameter integer RD_LATENCY = 2,
+    parameter int MEM_BYTES = 1024*1024,
+    parameter int ADDR_WIDTH = $clog2(MEM_BYTES)
 ) (
-  input  logic                  clk,
+    input  logic                  clk,
+    input  logic                  rst_n,
 
-  // Port A
-  input  logic                  a_valid,
-  input  logic [ADDR_WIDTH-1:0]  a_addr,
-  input  logic [31:0]           a_wdata,
-  input  logic [3:0]            a_wstrb,
-  output logic [31:0]           a_rdata,
-  output logic                  a_rvalid,   // NEW: indicates rdata corresponds to a past request
+    input  logic                  a_valid,
+    input  logic [ADDR_WIDTH-1:0] a_addr,
+    input  logic [31:0]           a_wdata,
+    input  logic [3:0]            a_wstrb,
+    output logic [31:0]           a_rdata,
+    output logic                  a_rvalid,
 
-  // Port B
-  input  logic                  b_valid,
-  input  logic [ADDR_WIDTH-1:0]  b_addr,
-  input  logic [31:0]           b_wdata,
-  input  logic [3:0]            b_wstrb,
-  output logic [31:0]           b_rdata,
-  output logic                  b_rvalid
+    input  logic                  b_valid,
+    input  logic [ADDR_WIDTH-1:0] b_addr,
+    input  logic [31:0]           b_wdata,
+    input  logic [3:0]            b_wstrb,
+    output logic [31:0]           b_rdata,
+    output logic                  b_rvalid
 );
 
-  // Byte-addressed storage
-  byte mem [0:MEM_BYTES-1];
+    logic [7:0] mem [0:MEM_BYTES-1];
 
-  function automatic [7:0] rd8(input integer unsigned addr);
-    if (addr < MEM_BYTES) rd8 = mem[addr];
-    else                  rd8 = 8'h00;
-  endfunction
+    // ---------------- Port A (instruction) ----------------
+    logic [ADDR_WIDTH-1:0] a_addr_pipe [0:RD_LATENCY-1];
+    logic                  a_valid_pipe [0:RD_LATENCY-1];
 
-  // -------------------------
-  // Port A pipelines
-  // -------------------------
-  logic [ADDR_WIDTH-1:0] a_addr_pipe [0:RD_LATENCY-1];
-  logic                  a_v_pipe    [0:RD_LATENCY-1];
-
-  // -------------------------
-  // Port B pipelines
-  // -------------------------
-  logic [ADDR_WIDTH-1:0] b_addr_pipe [0:RD_LATENCY-1];
-  logic                  b_v_pipe    [0:RD_LATENCY-1];
-
-  integer i;
-
-  // Optional init (prevents Xs on outputs)
-  initial begin
-    a_rdata  = 32'h0;
-    b_rdata  = 32'h0;
-    a_rvalid = 1'b0;
-    b_rvalid = 1'b0;
-
-    // Init pipelines to 0
-    for (i = 0; i < RD_LATENCY; i = i + 1) begin
-      a_addr_pipe[i] = '0; a_v_pipe[i] = 1'b0;
-      b_addr_pipe[i] = '0; b_v_pipe[i] = 1'b0;
-    end
-  end
-
-  // -------------------------
-  // Writes (posedge)
-  // -------------------------
-  always_ff @(posedge clk) begin
-    if (a_valid) begin
-      if (a_wstrb[0] && (a_addr + 0 < MEM_BYTES)) mem[a_addr + 0] <= a_wdata[7:0];
-      if (a_wstrb[1] && (a_addr + 1 < MEM_BYTES)) mem[a_addr + 1] <= a_wdata[15:8];
-      if (a_wstrb[2] && (a_addr + 2 < MEM_BYTES)) mem[a_addr + 2] <= a_wdata[23:16];
-      if (a_wstrb[3] && (a_addr + 3 < MEM_BYTES)) mem[a_addr + 3] <= a_wdata[31:24];
+    integer ai;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (ai = 0; ai < RD_LATENCY; ai = ai + 1) begin
+                a_addr_pipe[ai]  <= '0;
+                a_valid_pipe[ai] <= 1'b0;
+            end
+        end else begin
+            a_addr_pipe[0]  <= a_addr;
+            a_valid_pipe[0] <= a_valid;
+            for (ai = 1; ai < RD_LATENCY; ai = ai + 1) begin
+                a_addr_pipe[ai]  <= a_addr_pipe[ai-1];
+                a_valid_pipe[ai] <= a_valid_pipe[ai-1];
+            end
+            // writes on port A (unused normally, instruction port is read-only)
+            if (a_valid && a_wstrb != WSTRB_NONE) begin
+                if (a_wstrb[0]) mem[a_addr+0] <= a_wdata[7:0];
+                if (a_wstrb[1]) mem[a_addr+1] <= a_wdata[15:8];
+                if (a_wstrb[2]) mem[a_addr+2] <= a_wdata[23:16];
+                if (a_wstrb[3]) mem[a_addr+3] <= a_wdata[31:24];
+            end
+        end
     end
 
-    if (b_valid) begin
-      if (b_wstrb[0] && (b_addr + 0 < MEM_BYTES)) mem[b_addr + 0] <= b_wdata[7:0];
-      if (b_wstrb[1] && (b_addr + 1 < MEM_BYTES)) mem[b_addr + 1] <= b_wdata[15:8];
-      if (b_wstrb[2] && (b_addr + 2 < MEM_BYTES)) mem[b_addr + 2] <= b_wdata[23:16];
-      if (b_wstrb[3] && (b_addr + 3 < MEM_BYTES)) mem[b_addr + 3] <= b_wdata[31:24];
-    end
-  end
-
-  // -------------------------
-  // Read request pipelines (posedge)
-  // -------------------------
-  always_ff @(posedge clk) begin
-    // stage 0 captures incoming request
-    a_addr_pipe[0] <= a_addr;
-    a_v_pipe[0]    <= a_valid;
-
-    b_addr_pipe[0] <= b_addr;
-    b_v_pipe[0]    <= b_valid;
-
-    // shift down the pipeline
-    for (i = 1; i < RD_LATENCY; i = i + 1) begin
-      a_addr_pipe[i] <= a_addr_pipe[i-1];
-      a_v_pipe[i]    <= a_v_pipe[i-1];
-
-      b_addr_pipe[i] <= b_addr_pipe[i-1];
-      b_v_pipe[i]    <= b_v_pipe[i-1];
-    end
-  end
-
-  // -------------------------
-  // Read response generation (posedge)
-  // Data corresponds to addr_pipe[RD_LATENCY-1]
-  // -------------------------
-  always_ff @(posedge clk) begin : RESP
-    logic [ADDR_WIDTH-1:0] aa;
-    logic [ADDR_WIDTH-1:0] bb;
     logic [31:0] a_word;
-    logic [31:0] b_word;
+    assign a_word = {mem[a_addr_pipe[RD_LATENCY-1]+3], mem[a_addr_pipe[RD_LATENCY-1]+2],
+                      mem[a_addr_pipe[RD_LATENCY-1]+1], mem[a_addr_pipe[RD_LATENCY-1]+0]};
 
-    aa = a_addr_pipe[RD_LATENCY-1];
-    bb = b_addr_pipe[RD_LATENCY-1];
+    assign a_rdata  = a_word;
+    assign a_rvalid = a_valid_pipe[RD_LATENCY-1];
 
-    // Base read data (little-endian assembly)
-    a_word = { rd8(aa + 3), rd8(aa + 2), rd8(aa + 1), rd8(aa + 0) };
-    b_word = { rd8(bb + 3), rd8(bb + 2), rd8(bb + 1), rd8(bb + 0) };
+    // ---------------- Port B (data) ----------------
+    logic [ADDR_WIDTH-1:0] b_addr_pipe [0:RD_LATENCY-1];
+    logic                  b_valid_pipe [0:RD_LATENCY-1];
+    logic                  b_is_write_pipe [0:RD_LATENCY-1];
 
-    // Optional same-port write-first modeling (only for same cycle as request stage 0)
-    // This is a corner-case model; you can ignore if you don't care.
-    if (WRITE_FIRST) begin
-      // If the *request being returned now* was issued RD_LATENCY cycles ago,
-      // we do NOT track the historical write strobes for that request here.
-      // So WRITE_FIRST is only meaningful when RD_LATENCY==1.
-      if (RD_LATENCY == 1) begin
-        if (a_valid && (a_wstrb != 0) && (a_addr == aa)) begin
-          if (a_wstrb[0]) a_word[7:0]   = a_wdata[7:0];
-          if (a_wstrb[1]) a_word[15:8]  = a_wdata[15:8];
-          if (a_wstrb[2]) a_word[23:16] = a_wdata[23:16];
-          if (a_wstrb[3]) a_word[31:24] = a_wdata[31:24];
+    integer bi;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (bi = 0; bi < RD_LATENCY; bi = bi + 1) begin
+                b_addr_pipe[bi]     <= '0;
+                b_valid_pipe[bi]    <= 1'b0;
+                b_is_write_pipe[bi] <= 1'b0;
+            end
+        end else begin
+            b_addr_pipe[0]     <= b_addr;
+            b_valid_pipe[0]    <= b_valid;
+            b_is_write_pipe[0] <= b_valid && (b_wstrb != WSTRB_NONE);
+            for (bi = 1; bi < RD_LATENCY; bi = bi + 1) begin
+                b_addr_pipe[bi]     <= b_addr_pipe[bi-1];
+                b_valid_pipe[bi]    <= b_valid_pipe[bi-1];
+                b_is_write_pipe[bi] <= b_is_write_pipe[bi-1];
+            end
+            if (b_valid && b_wstrb != WSTRB_NONE) begin
+                if (b_wstrb[0]) mem[b_addr+0] <= b_wdata[7:0];
+                if (b_wstrb[1]) mem[b_addr+1] <= b_wdata[15:8];
+                if (b_wstrb[2]) mem[b_addr+2] <= b_wdata[23:16];
+                if (b_wstrb[3]) mem[b_addr+3] <= b_wdata[31:24];
+            end
         end
-        if (b_valid && (b_wstrb != 0) && (b_addr == bb)) begin
-          if (b_wstrb[0]) b_word[7:0]   = b_wdata[7:0];
-          if (b_wstrb[1]) b_word[15:8]  = b_wdata[15:8];
-          if (b_wstrb[2]) b_word[23:16] = b_wdata[23:16];
-          if (b_wstrb[3]) b_word[31:24] = b_wdata[31:24];
-        end
-      end
     end
 
-    a_rdata  <= a_word;
-    b_rdata  <= b_word;
-    a_rvalid <= a_v_pipe[RD_LATENCY-1];
-    b_rvalid <= b_v_pipe[RD_LATENCY-1];
-  end
+    logic [31:0] b_word;
+    assign b_word = {mem[b_addr_pipe[RD_LATENCY-1]+3], mem[b_addr_pipe[RD_LATENCY-1]+2],
+                      mem[b_addr_pipe[RD_LATENCY-1]+1], mem[b_addr_pipe[RD_LATENCY-1]+0]};
+
+    assign b_rdata  = b_word;
+    assign b_rvalid = b_valid_pipe[RD_LATENCY-1] && !b_is_write_pipe[RD_LATENCY-1];
+
+    // Preload
+    initial begin
+        for (int k = 0; k < MEM_BYTES; k++) mem[k] = 8'h00;
+    end
 
 endmodule
 
@@ -480,96 +372,102 @@ module mrv32_bru (
 endmodule
 
 
-//==============================================================================
-// Module: mrv32_fetch v1.1
-//------------------------------------------------------------------------------
-// Description:
-//   Instruction Fetch stage for pipelined execution.
-//
-// Behavior:
-//   - Continuously fetches instructions, advancing PC each cycle.
-//   - PC advances by 4 each cycle unless take_branch is asserted,
-//     in which case PC jumps to branch_target.
-//   - Outputs NOP (0x00000013) and instr_valid=0 while waiting for
-//     memory to return data or after a branch redirect.
-//   - instr_valid=1 only when a_rvalid returns a real instruction.
-//
-// Notes:
-//   Branch flush (squashing in-flight instructions) is not yet implemented.
-//   Pipeline stages behind the branch will need to be invalidated separately.
-//
-// Interfaces:
-//   - Memory request/response handshake (always fetching)
-//   - take_branch / branch_target from MEM stage for PC redirect
-//
-// Author: Martim Bento
-// Date  : 08/03/2026
-//==============================================================================
-
 import mrv32_pkg::*;
 
-module mrv32_fetch (
+// ===================== Fetch (non-speculative-delivery queue) =====================
+// Design notes:
+//  - Issuance of new memory requests (a_valid) is NEVER throttled by an
+//    unresolved branch/jump; fetch keeps reading ahead into the queue.
+//  - Only DELIVERY (handing an instruction to ID) freezes while a branch or
+//    jump sits unresolved in ID or EX. The core computes this as
+//    `branch_pending` and feeds it in on `stall`, together with any
+//    load_stall / global_stall conditions.
+//  - On take_branch, the ENTIRE in-flight queue's `wantq` is unconditionally
+//    cleared (marking every outstanding/queued entry as "don't deliver").
+//    Flushed entries just drain as harmless NOP bubbles as head catches up.
+//    This replaces an earlier, much more fragile "dedup matching already
+//    in-flight entries" design — once delivery itself never runs ahead of
+//    an unresolved branch, no instruction past the branch is ever delivered
+//    before the branch resolves, so there is nothing to de-duplicate.
+module mrv32_fetch #(
+    parameter integer MAX_OUTSTANDING = 8
+) (
     input  logic                  clk,
     input  logic                  rst_n,
-
-    // Memory port A (instruction side)
     output logic                  a_valid,
     output logic [ADDR_WIDTH-1:0] a_addr,
     output logic [31:0]           a_wdata,
     output logic [3:0]            a_wstrb,
     input  logic [31:0]           a_rdata,
     input  logic                  a_rvalid,
-
-    // Branch redirect from MEM stage
-    input  logic                  take_branch,
     input  logic [31:0]           branch_target,
-
-    // Stall from hazard unit
-    input  logic                  stall,
-
-    // Output to IF/ID stage register
+    input  logic                  take_branch,
+    input  logic                  stall,     // freezes DELIVERY only (global_stall | load_stall | branch_pending)
     output logic [31:0]           instr,
     output logic [31:0]           pc,
     output logic                  instr_valid
 );
+    localparam integer QW = $clog2(MAX_OUTSTANDING);
 
-  localparam NOP = 32'h00000013; // ADDI x0, x0, 0
+    logic [31:0]  pc_fetch;
+    logic [QW:0]  tail, recv, head;
+    logic [QW:0]  depth;
 
-  logic [31:0] pc_fetch; // PC of the instruction currently being fetched
+    assign depth   = tail - head;
+    assign a_valid = rst_n && (depth < MAX_OUTSTANDING);
+    assign a_addr  = pc_fetch[ADDR_WIDTH-1:0];
+    assign a_wdata = 32'd0;
+    assign a_wstrb = 4'd0;
 
-  // PC register — advances every cycle unless stalled
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)
-      pc_fetch <= 32'd0;
-    else if (!stall) begin
-      if (take_branch)
-        pc_fetch <= branch_target;
-      else
-        pc_fetch <= pc_fetch + 32'd4;
+    logic [31:0] pcq   [0:MAX_OUTSTANDING-1];
+    logic [31:0] dataq [0:MAX_OUTSTANDING-1];
+    logic        wantq [0:MAX_OUTSTANDING-1];
+    logic        readyq[0:MAX_OUTSTANDING-1];
+
+    logic can_deliver;
+    assign can_deliver = !stall && (head != tail) && readyq[head[QW-1:0]];
+
+    assign instr       = wantq[head[QW-1:0]] ? dataq[head[QW-1:0]] : 32'h00000013; // NOP
+    assign pc          = pcq[head[QW-1:0]];
+    assign instr_valid = can_deliver && wantq[head[QW-1:0]];
+
+    integer fi;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            tail <= '0;
+            recv <= '0;
+            head <= '0;
+            pc_fetch <= 32'd0;
+            for (fi = 0; fi < MAX_OUTSTANDING; fi = fi + 1) begin
+                wantq[fi]  <= 1'b0;
+                readyq[fi] <= 1'b0;
+            end
+        end else begin
+            if (take_branch) begin
+                for (fi = 0; fi < MAX_OUTSTANDING; fi = fi + 1) wantq[fi] <= 1'b0;
+            end
+
+            if (a_valid) begin
+                pcq[tail[QW-1:0]]   <= pc_fetch;
+                wantq[tail[QW-1:0]] <= !take_branch;
+                tail <= tail + 1'b1;
+            end
+
+            if (a_rvalid && ((recv != tail) || a_valid)) begin
+                dataq[recv[QW-1:0]]  <= a_rdata;
+                readyq[recv[QW-1:0]] <= 1'b1;
+                recv <= recv + 1'b1;
+            end
+
+            if (can_deliver) begin
+                readyq[head[QW-1:0]] <= 1'b0;
+                head <= head + 1'b1;
+            end
+
+            if (take_branch)  pc_fetch <= branch_target;
+            else if (a_valid) pc_fetch <= pc_fetch + 32'd4;
+        end
     end
-  end
-
-  // Always request a fetch
-  assign a_valid = 1'b1;
-  assign a_addr  = pc_fetch[ADDR_WIDTH-1:0];
-  assign a_wdata = 32'd0;
-  assign a_wstrb = 4'b0000;
-
-  // Output to IF/ID register
-  // pc_fetch is registered so it trails the fetch address by one cycle,
-  // matching the cycle when a_rvalid returns
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) begin
-      instr       <= NOP;
-      pc          <= 32'd0;
-      instr_valid <= 1'b0;
-    end else if (!stall) begin
-      instr       <= a_rvalid ? a_rdata : NOP;
-      pc          <= pc_fetch;
-      instr_valid <= a_rvalid && !take_branch;
-    end
-  end
-
 endmodule
 
 
@@ -1352,10 +1250,11 @@ mrv32_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_vali
                 .instr_valid(instr_valid_fetch), .branch_target(jal_target), .take_branch(take_branch), .stall(stall | load_stall));
 
 logic [64:0] reg_if_id;
-// Stage Register between IF and ID
 always_ff @(posedge clk) begin
-    if (!rst_n || take_branch || load_stall)
+    if (!rst_n || take_branch)
         reg_if_id <= 0;
+    else if (load_stall)
+        reg_if_id <= reg_if_id; // hold: keep the hazardous instruction for redecode
     else if (!stall)
         reg_if_id <= {instr_if, pc_if, instr_valid_fetch};
 end
@@ -1399,7 +1298,11 @@ logic [99:0] reg_id_ex;
 always_ff @(posedge clk) begin
     if (!rst_n || take_branch)
         reg_id_ex <= 0;
-    else if (!stall)
+    else if (stall)
+        reg_id_ex <= reg_id_ex; // hold the value
+    else if (load_stall)
+        reg_id_ex <= 0;
+    else
         reg_id_ex <= {unsupported & iv_if_id, br_sel, is_jalr, is_auipc, pc_id, instr_valid_decode,
         load_unsigned, rs1_addr, rs2_addr, rd_addr, aluop, alusrc, mem_ren, mem_wen, mem_wstrb, reg_wen, is_lui, imm,
         mem_valid};
@@ -1529,6 +1432,8 @@ always_ff @(posedge clk) begin
         reg_mem_wb <= 0;
     else if (!stall)
         reg_mem_wb <= {illegal_mem, take_branch, pc_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, alu_result_mem, load_data};
+    else
+        reg_mem_wb <= 0;
 end
 
 assign illegal_wb = reg_mem_wb[105];
