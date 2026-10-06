@@ -71,12 +71,11 @@ mrv32_fetch fetch(.clk(clk), .rst_n(rst_n), .a_rvalid(a_rvalid), .a_valid(a_vali
                 .instr_valid(instr_valid_fetch), .branch_target(jal_target), .take_branch(take_branch), .stall(stall | load_stall));
 
 logic [64:0] reg_if_id;
-// Stage Register between IF and ID
 always_ff @(posedge clk) begin
     if (!rst_n || take_branch)
         reg_if_id <= 0;
     else if (load_stall)
-        reg_if_id <= reg_if_id; // hold the value
+        reg_if_id <= reg_if_id; // hold: keep the hazardous instruction for redecode
     else if (!stall)
         reg_if_id <= {instr_if, pc_if, instr_valid_fetch};
 end
@@ -254,6 +253,8 @@ always_ff @(posedge clk) begin
         reg_mem_wb <= 0;
     else if (!stall)
         reg_mem_wb <= {illegal_mem, take_branch, pc_mem, mem_ren_mem, true_instr_valid, rd_addr_mem, reg_wen_mem, alu_result_mem, load_data};
+    else
+        reg_mem_wb <= 0;
 end
 
 assign illegal_wb = reg_mem_wb[105];

@@ -1,93 +1,106 @@
-// =============================================================================
-// dual_port_byte_mem (instant - zero latency)
-// =============================================================================
-// Byte-addressed, dual-port memory model for RTL simulation.
-//
-// Intended use:
-//   - CPU bring-up and hazard validation (NOT meant for synthesis).
-//   - Zero-latency combinational reads on both ports.
-//   - Drop-in replacement for the pipelined dual_port_byte_mem.
-//   - RD_LATENCY and WRITE_FIRST parameters kept for compatibility but ignored.
-//
-// Addressing / Endianness:
-//   - Byte addressed: address selects a byte in `mem[]`.
-//   - 32-bit reads return 4 consecutive bytes in little-endian order.
-//
-// Notes:
-//   - a_rvalid and b_rvalid are always 1.
-//   - Writes are still synchronous (posedge clk).
-//   - Use $readmemh to load programs: $readmemh("prog.hex", dut.mem);
-//   - The read path is NOT a plain `assign`/`always_comb` over mem[] indexed by
-//     a variable, because several simulators don't reliably resensitize such a
-//     read when only the array contents change and the index stays fixed
-//     (exactly what happens on sw followed by lw to the same held address).
-//     `always_comb`/`always @*` is also prohibitively slow to elaborate here
-//     since sensitivity analysis has to consider the whole array. Instead, a
-//     small `wr_gen` counter increments every cycle in the same clocked
-//     process as the writes, and the read process is purely level-sensitive
-//     to `wr_gen` (plus the addresses) -- this guarantees a re-evaluation
-//     every cycle, after that cycle's writes have committed, using nothing
-//     but small explicit signals. `wr_gen` is explicitly initialized (X + 1
-//     stays X forever in some simulators otherwise, which silently defeats
-//     this whole mechanism).
-// =============================================================================
+import mrv32_pkg::*;
 
 module dual_port_byte_mem #(
-  parameter integer MEM_BYTES   = 64 * 1024,
-  parameter integer ADDR_WIDTH  = $clog2(MEM_BYTES),
-  parameter integer RD_LATENCY  = 1,  // ignored, kept for compatibility
-  parameter integer WRITE_FIRST = 0   // ignored, kept for compatibility
+    parameter integer RD_LATENCY = 2,
+    parameter int MEM_BYTES = 1024*1024,
+    parameter int ADDR_WIDTH = $clog2(MEM_BYTES)
 ) (
-  input  logic                  clk,
+    input  logic                  clk,
+    input  logic                  rst_n,
 
-  // Port A
-  input  logic                  a_valid,
-  input  logic [ADDR_WIDTH-1:0] a_addr,
-  input  logic [31:0]           a_wdata,
-  input  logic [3:0]            a_wstrb,
-  output logic [31:0]           a_rdata,
-  output logic                  a_rvalid,
+    input  logic                  a_valid,
+    input  logic [ADDR_WIDTH-1:0] a_addr,
+    input  logic [31:0]           a_wdata,
+    input  logic [3:0]            a_wstrb,
+    output logic [31:0]           a_rdata,
+    output logic                  a_rvalid,
 
-  // Port B
-  input  logic                  b_valid,
-  input  logic [ADDR_WIDTH-1:0] b_addr,
-  input  logic [31:0]           b_wdata,
-  input  logic [3:0]            b_wstrb,
-  output logic [31:0]           b_rdata,
-  output logic                  b_rvalid
+    input  logic                  b_valid,
+    input  logic [ADDR_WIDTH-1:0] b_addr,
+    input  logic [31:0]           b_wdata,
+    input  logic [3:0]            b_wstrb,
+    output logic [31:0]           b_rdata,
+    output logic                  b_rvalid
 );
 
-  byte mem [0:MEM_BYTES-1];
+    logic [7:0] mem [0:MEM_BYTES-1];
 
-  assign a_rvalid = 1'b1;
-  assign b_rvalid = 1'b1;
+    // ---------------- Port A (instruction) ----------------
+    logic [ADDR_WIDTH-1:0] a_addr_pipe [0:RD_LATENCY-1];
+    logic                  a_valid_pipe [0:RD_LATENCY-1];
 
-  // Ticks every cycle unconditionally, purely to give the read process below
-  // something small and explicit to be sensitive to (see header note).
-  logic [3:0] wr_gen;
-  initial wr_gen = 4'd0;
-
-  // Synchronous writes
-  always_ff @(posedge clk) begin
-    wr_gen <= wr_gen + 4'd1;
-    if (a_valid) begin
-      if (a_wstrb[0] && (a_addr+0 < MEM_BYTES)) mem[a_addr+0] <= a_wdata[7:0];
-      if (a_wstrb[1] && (a_addr+1 < MEM_BYTES)) mem[a_addr+1] <= a_wdata[15:8];
-      if (a_wstrb[2] && (a_addr+2 < MEM_BYTES)) mem[a_addr+2] <= a_wdata[23:16];
-      if (a_wstrb[3] && (a_addr+3 < MEM_BYTES)) mem[a_addr+3] <= a_wdata[31:24];
+    integer ai;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (ai = 0; ai < RD_LATENCY; ai = ai + 1) begin
+                a_addr_pipe[ai]  <= '0;
+                a_valid_pipe[ai] <= 1'b0;
+            end
+        end else begin
+            a_addr_pipe[0]  <= a_addr;
+            a_valid_pipe[0] <= a_valid;
+            for (ai = 1; ai < RD_LATENCY; ai = ai + 1) begin
+                a_addr_pipe[ai]  <= a_addr_pipe[ai-1];
+                a_valid_pipe[ai] <= a_valid_pipe[ai-1];
+            end
+            // writes on port A (unused normally, instruction port is read-only)
+            if (a_valid && a_wstrb != WSTRB_NONE) begin
+                if (a_wstrb[0]) mem[a_addr+0] <= a_wdata[7:0];
+                if (a_wstrb[1]) mem[a_addr+1] <= a_wdata[15:8];
+                if (a_wstrb[2]) mem[a_addr+2] <= a_wdata[23:16];
+                if (a_wstrb[3]) mem[a_addr+3] <= a_wdata[31:24];
+            end
+        end
     end
-    if (b_valid) begin
-      if (b_wstrb[0] && (b_addr+0 < MEM_BYTES)) mem[b_addr+0] <= b_wdata[7:0];
-      if (b_wstrb[1] && (b_addr+1 < MEM_BYTES)) mem[b_addr+1] <= b_wdata[15:8];
-      if (b_wstrb[2] && (b_addr+2 < MEM_BYTES)) mem[b_addr+2] <= b_wdata[23:16];
-      if (b_wstrb[3] && (b_addr+3 < MEM_BYTES)) mem[b_addr+3] <= b_wdata[31:24];
-    end
-  end
 
-  // Port A/B — "combinational" read, always valid. Purely level-sensitive.
-  always @(a_addr or b_addr or wr_gen) begin
-    a_rdata = (a_addr+3 < MEM_BYTES) ? {mem[a_addr+3], mem[a_addr+2], mem[a_addr+1], mem[a_addr+0]} : 32'h0;
-    b_rdata = (b_addr+3 < MEM_BYTES) ? {mem[b_addr+3], mem[b_addr+2], mem[b_addr+1], mem[b_addr+0]} : 32'h0;
-  end
+    logic [31:0] a_word;
+    assign a_word = {mem[a_addr_pipe[RD_LATENCY-1]+3], mem[a_addr_pipe[RD_LATENCY-1]+2],
+                      mem[a_addr_pipe[RD_LATENCY-1]+1], mem[a_addr_pipe[RD_LATENCY-1]+0]};
+
+    assign a_rdata  = a_word;
+    assign a_rvalid = a_valid_pipe[RD_LATENCY-1];
+
+    // ---------------- Port B (data) ----------------
+    logic [ADDR_WIDTH-1:0] b_addr_pipe [0:RD_LATENCY-1];
+    logic                  b_valid_pipe [0:RD_LATENCY-1];
+    logic                  b_is_write_pipe [0:RD_LATENCY-1];
+
+    integer bi;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) begin
+            for (bi = 0; bi < RD_LATENCY; bi = bi + 1) begin
+                b_addr_pipe[bi]     <= '0;
+                b_valid_pipe[bi]    <= 1'b0;
+                b_is_write_pipe[bi] <= 1'b0;
+            end
+        end else begin
+            b_addr_pipe[0]     <= b_addr;
+            b_valid_pipe[0]    <= b_valid;
+            b_is_write_pipe[0] <= b_valid && (b_wstrb != WSTRB_NONE);
+            for (bi = 1; bi < RD_LATENCY; bi = bi + 1) begin
+                b_addr_pipe[bi]     <= b_addr_pipe[bi-1];
+                b_valid_pipe[bi]    <= b_valid_pipe[bi-1];
+                b_is_write_pipe[bi] <= b_is_write_pipe[bi-1];
+            end
+            if (b_valid && b_wstrb != WSTRB_NONE) begin
+                if (b_wstrb[0]) mem[b_addr+0] <= b_wdata[7:0];
+                if (b_wstrb[1]) mem[b_addr+1] <= b_wdata[15:8];
+                if (b_wstrb[2]) mem[b_addr+2] <= b_wdata[23:16];
+                if (b_wstrb[3]) mem[b_addr+3] <= b_wdata[31:24];
+            end
+        end
+    end
+
+    logic [31:0] b_word;
+    assign b_word = {mem[b_addr_pipe[RD_LATENCY-1]+3], mem[b_addr_pipe[RD_LATENCY-1]+2],
+                      mem[b_addr_pipe[RD_LATENCY-1]+1], mem[b_addr_pipe[RD_LATENCY-1]+0]};
+
+    assign b_rdata  = b_word;
+    assign b_rvalid = b_valid_pipe[RD_LATENCY-1] && !b_is_write_pipe[RD_LATENCY-1];
+
+    // Preload
+    initial begin
+        for (int k = 0; k < MEM_BYTES; k++) mem[k] = 8'h00;
+    end
 
 endmodule
